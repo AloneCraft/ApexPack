@@ -406,7 +406,8 @@ public class ApexPackGenerator : IIncrementalGenerator
         switch (type.SpecialType)
         {
             case SpecialType.System_Byte: sb.AppendLine($"        writer.WriteByte({access});"); return;
-            case SpecialType.System_SByte: sb.AppendLine($"        writer.WriteByte((byte){access});"); return;
+            case SpecialType.System_SByte: sb.AppendLine($"        writer.WriteSByte({access});"); return;
+            case SpecialType.System_Char: sb.AppendLine($"        writer.WriteChar({access});"); return;
             case SpecialType.System_Int16: sb.AppendLine($"        writer.WriteInt16({access});"); return;
             case SpecialType.System_UInt16: sb.AppendLine($"        writer.WriteUInt16({access});"); return;
             case SpecialType.System_Int32: sb.AppendLine($"        writer.WriteInt32({access});"); return;
@@ -416,7 +417,28 @@ public class ApexPackGenerator : IIncrementalGenerator
             case SpecialType.System_Single: sb.AppendLine($"        writer.WriteSingle({access});"); return;
             case SpecialType.System_Double: sb.AppendLine($"        writer.WriteDouble({access});"); return;
             case SpecialType.System_Boolean: sb.AppendLine($"        writer.WriteBoolean({access});"); return;
+            case SpecialType.System_Decimal: sb.AppendLine($"        writer.WriteDecimal({access});"); return;
+            case SpecialType.System_DateTime: sb.AppendLine($"        writer.WriteDateTime({access});"); return;
             case SpecialType.System_String: sb.AppendLine($"        writer.WriteString({access});"); return;
+        }
+
+        string typeName = type.ToDisplayString();
+        if (typeName == "System.Guid")
+        {
+            sb.AppendLine($"        writer.WriteGuid({access});");
+            return;
+        }
+        if (typeName == "System.TimeSpan")
+        {
+            sb.AppendLine($"        writer.WriteTimeSpan({access});");
+            return;
+        }
+
+        if (type.TypeKind == TypeKind.Enum)
+        {
+            var underlying = ((INamedTypeSymbol)type).EnumUnderlyingType!;
+            EmitWriteValue(sb, underlying, $"({underlying.ToDisplayString()}){access}");
+            return;
         }
 
         if (type is IArrayTypeSymbol arrayType)
@@ -433,6 +455,20 @@ public class ApexPackGenerator : IIncrementalGenerator
             return;
         }
 
+        if (type is INamedTypeSymbol namedType && namedType.IsGenericType && namedType.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.List<T>")
+        {
+            var elemType = namedType.TypeArguments[0];
+            if (elemType.IsValueType && elemType.IsUnmanagedType)
+            {
+                sb.AppendLine($"        ApexPackSerializer.SerializeUnmanagedList(ref writer, {access});");
+            }
+            else
+            {
+                sb.AppendLine($"        ApexPackSerializer.SerializeList(ref writer, {access});");
+            }
+            return;
+        }
+
         var unannotatedType = type.WithNullableAnnotation(NullableAnnotation.NotAnnotated);
         string fullType = unannotatedType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
         string tmpVarName = "_tmp_" + Math.Abs(access.GetHashCode()).ToString();
@@ -445,7 +481,8 @@ public class ApexPackGenerator : IIncrementalGenerator
         switch (type.SpecialType)
         {
             case SpecialType.System_Byte: sb.AppendLine($"        byte {localName} = reader.ReadByte();"); return;
-            case SpecialType.System_SByte: sb.AppendLine($"        sbyte {localName} = (sbyte)reader.ReadByte();"); return;
+            case SpecialType.System_SByte: sb.AppendLine($"        sbyte {localName} = reader.ReadSByte();"); return;
+            case SpecialType.System_Char: sb.AppendLine($"        char {localName} = reader.ReadChar();"); return;
             case SpecialType.System_Int16: sb.AppendLine($"        short {localName} = reader.ReadInt16();"); return;
             case SpecialType.System_UInt16: sb.AppendLine($"        ushort {localName} = reader.ReadUInt16();"); return;
             case SpecialType.System_Int32: sb.AppendLine($"        int {localName} = reader.ReadInt32();"); return;
@@ -455,7 +492,30 @@ public class ApexPackGenerator : IIncrementalGenerator
             case SpecialType.System_Single: sb.AppendLine($"        float {localName} = reader.ReadSingle();"); return;
             case SpecialType.System_Double: sb.AppendLine($"        double {localName} = reader.ReadDouble();"); return;
             case SpecialType.System_Boolean: sb.AppendLine($"        bool {localName} = reader.ReadBoolean();"); return;
+            case SpecialType.System_Decimal: sb.AppendLine($"        decimal {localName} = reader.ReadDecimal();"); return;
+            case SpecialType.System_DateTime: sb.AppendLine($"        DateTime {localName} = reader.ReadDateTime();"); return;
             case SpecialType.System_String: sb.AppendLine($"        string? {localName} = reader.ReadString();"); return;
+        }
+
+        string typeName = type.ToDisplayString();
+        if (typeName == "System.Guid")
+        {
+            sb.AppendLine($"        Guid {localName} = reader.ReadGuid();");
+            return;
+        }
+        if (typeName == "System.TimeSpan")
+        {
+            sb.AppendLine($"        TimeSpan {localName} = reader.ReadTimeSpan();");
+            return;
+        }
+
+        if (type.TypeKind == TypeKind.Enum)
+        {
+            var underlying = ((INamedTypeSymbol)type).EnumUnderlyingType!;
+            string tmpUnderlying = "tmp_e_" + localName;
+            EmitReadIntoLocal(sb, underlying, tmpUnderlying);
+            sb.AppendLine($"        {type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {localName} = ({type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}){tmpUnderlying};");
+            return;
         }
 
         if (type is IArrayTypeSymbol arrayType)
@@ -468,6 +528,20 @@ public class ApexPackGenerator : IIncrementalGenerator
             else
             {
                 sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeArray<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader>(ref reader);");
+            }
+            return;
+        }
+
+        if (type is INamedTypeSymbol namedType && namedType.IsGenericType && namedType.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.List<T>")
+        {
+            var elemType = namedType.TypeArguments[0];
+            if (elemType.IsValueType && elemType.IsUnmanagedType)
+            {
+                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeUnmanagedList<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader>(ref reader);");
+            }
+            else
+            {
+                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeList<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader>(ref reader);");
             }
             return;
         }

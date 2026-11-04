@@ -2,8 +2,6 @@ using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
-using ApexPack.Hardware;
 
 namespace ApexPack.Buffers;
 
@@ -45,64 +43,52 @@ public ref struct ApexSpanWriter : IApexBufferWriter
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteByte(byte value)
-    {
-        GetSpan(1)[0] = value;
-    }
+    public void WriteByte(byte value) => GetSpan(1)[0] = value;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteInt16(short value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(short))), value);
-    }
+    public void WriteSByte(sbyte value) => GetSpan(1)[0] = (byte)value;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteUInt16(ushort value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(ushort))), value);
-    }
+    public void WriteChar(char value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(char))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteInt32(int value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(int))), value);
-    }
+    public void WriteInt16(short value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(short))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteUInt32(uint value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(uint))), value);
-    }
+    public void WriteUInt16(ushort value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(ushort))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteInt64(long value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(long))), value);
-    }
+    public void WriteInt32(int value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(int))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteUInt64(ulong value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(ulong))), value);
-    }
+    public void WriteUInt32(uint value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(uint))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteSingle(float value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(float))), value);
-    }
+    public void WriteInt64(long value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(long))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteDouble(double value)
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(double))), value);
-    }
+    public void WriteUInt64(ulong value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(ulong))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteBoolean(bool value)
-    {
-        WriteByte(value ? (byte)1 : (byte)0);
-    }
+    public void WriteSingle(float value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(float))), value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteDouble(double value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(double))), value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteBoolean(bool value) => WriteByte(value ? (byte)1 : (byte)0);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteGuid(Guid value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<Guid>())), value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteDateTime(DateTime value) => WriteInt64(value.ToBinary());
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteTimeSpan(TimeSpan value) => WriteInt64(value.Ticks);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteDecimal(decimal value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<decimal>())), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteRaw(ReadOnlySpan<byte> source)
@@ -129,6 +115,10 @@ public ref struct ApexSpanWriter : IApexBufferWriter
         Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<T>())), value);
     }
 
+    /// <summary>
+    /// Writes a System.String directly as UTF-16 in-memory memory blit (zero transcoding overhead).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteString(string? value)
     {
         if (value is null)
@@ -137,29 +127,12 @@ public ref struct ApexSpanWriter : IApexBufferWriter
             return;
         }
 
-        if (value.Length == 0)
+        int charLength = value.Length;
+        WriteInt32(charLength);
+        if (charLength > 0)
         {
-            WriteInt32(0);
-            return;
-        }
-
-        var chars = value.AsSpan();
-        if (HardwareIntrinsics.IsAllAscii(chars))
-        {
-            // ASCII format flag: positive byte length with bit 31 unset
-            int byteCount = chars.Length;
-            WriteInt32(byteCount);
-            var dest = GetSpan(byteCount);
-            HardwareIntrinsics.CopyAsciiCharsToUtf8(chars, dest);
-        }
-        else
-        {
-            int maxBytes = Encoding.UTF8.GetByteCount(chars);
-            // Non-ASCII flag: negative length encoding or distinct length
-            // We write actual UTF-8 byte count
-            WriteInt32(maxBytes);
-            var dest = GetSpan(maxBytes);
-            Encoding.UTF8.GetBytes(chars, dest);
+            ReadOnlySpan<byte> byteSpan = MemoryMarshal.AsBytes(value.AsSpan());
+            WriteRaw(byteSpan);
         }
     }
 }

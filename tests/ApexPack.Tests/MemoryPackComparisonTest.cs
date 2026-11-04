@@ -146,6 +146,7 @@ public class MemoryPackComparisonTest
         byte[] apexBytes = ApexPackSerializer.Serialize(model);
         var apexResult = ApexPackSerializer.Deserialize<SparseNullableModel>(apexBytes);
 
+        Assert.NotNull(mpResult);
         Assert.NotNull(apexResult);
         Assert.Equal(mpResult.Id, apexResult.Id);
         Assert.Equal(mpResult.IsActive, apexResult.IsActive);

@@ -1,7 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace ApexPack.Buffers;
 
@@ -46,6 +45,12 @@ public ref struct ApexSpanReader : IApexBufferReader
     public byte ReadByte() => GetSpan(1)[0];
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public sbyte ReadSByte() => (sbyte)GetSpan(1)[0];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public char ReadChar() => Unsafe.ReadUnaligned<char>(ref MemoryMarshal.GetReference(GetSpan(sizeof(char))));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public short ReadInt16() => Unsafe.ReadUnaligned<short>(ref MemoryMarshal.GetReference(GetSpan(sizeof(short))));
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -73,6 +78,18 @@ public ref struct ApexSpanReader : IApexBufferReader
     public bool ReadBoolean() => ReadByte() != 0;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Guid ReadGuid() => Unsafe.ReadUnaligned<Guid>(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<Guid>())));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public DateTime ReadDateTime() => DateTime.FromBinary(ReadInt64());
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public TimeSpan ReadTimeSpan() => TimeSpan.FromTicks(ReadInt64());
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public decimal ReadDecimal() => Unsafe.ReadUnaligned<decimal>(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<decimal>())));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ReadOnlySpan<byte> ReadRaw(int length) => GetSpan(length);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -93,13 +110,19 @@ public ref struct ApexSpanReader : IApexBufferReader
         return Unsafe.ReadUnaligned<T>(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<T>())));
     }
 
+    /// <summary>
+    /// Reads a System.String directly from UTF-16 in-memory memory blit (zero transcoding overhead).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public string? ReadString()
     {
-        int length = ReadInt32();
-        if (length == -1) return null;
-        if (length == 0) return string.Empty;
+        int charLength = ReadInt32();
+        if (charLength == -1) return null;
+        if (charLength == 0) return string.Empty;
 
-        var bytes = GetSpan(length);
-        return Encoding.UTF8.GetString(bytes);
+        int byteLength = checked(charLength * sizeof(char));
+        ReadOnlySpan<byte> byteSpan = GetSpan(byteLength);
+        ReadOnlySpan<char> charSpan = MemoryMarshal.Cast<byte, char>(byteSpan);
+        return new string(charSpan);
     }
 }

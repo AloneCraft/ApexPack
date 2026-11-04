@@ -2,8 +2,6 @@ using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
-using ApexPack.Hardware;
 
 namespace ApexPack.Buffers;
 
@@ -59,6 +57,12 @@ public struct ApexBufferWriter : IApexBufferWriter, IDisposable
     public void WriteByte(byte value) => GetSpan(1)[0] = value;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSByte(sbyte value) => GetSpan(1)[0] = (byte)value;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteChar(char value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(char))), value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteInt16(short value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(short))), value);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -86,6 +90,18 @@ public struct ApexBufferWriter : IApexBufferWriter, IDisposable
     public void WriteBoolean(bool value) => WriteByte(value ? (byte)1 : (byte)0);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteGuid(Guid value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<Guid>())), value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteDateTime(DateTime value) => WriteInt64(value.ToBinary());
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteTimeSpan(TimeSpan value) => WriteInt64(value.Ticks);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteDecimal(decimal value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<decimal>())), value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteRaw(ReadOnlySpan<byte> source)
     {
         if (source.IsEmpty) return;
@@ -110,6 +126,10 @@ public struct ApexBufferWriter : IApexBufferWriter, IDisposable
         Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<T>())), value);
     }
 
+    /// <summary>
+    /// Writes a System.String directly as UTF-16 in-memory memory blit (zero transcoding overhead).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteString(string? value)
     {
         if (value is null)
@@ -118,26 +138,12 @@ public struct ApexBufferWriter : IApexBufferWriter, IDisposable
             return;
         }
 
-        if (value.Length == 0)
+        int charLength = value.Length;
+        WriteInt32(charLength);
+        if (charLength > 0)
         {
-            WriteInt32(0);
-            return;
-        }
-
-        var chars = value.AsSpan();
-        if (HardwareIntrinsics.IsAllAscii(chars))
-        {
-            int byteCount = chars.Length;
-            WriteInt32(byteCount);
-            var dest = GetSpan(byteCount);
-            HardwareIntrinsics.CopyAsciiCharsToUtf8(chars, dest);
-        }
-        else
-        {
-            int maxBytes = Encoding.UTF8.GetByteCount(chars);
-            WriteInt32(maxBytes);
-            var dest = GetSpan(maxBytes);
-            Encoding.UTF8.GetBytes(chars, dest);
+            ReadOnlySpan<byte> byteSpan = MemoryMarshal.AsBytes(value.AsSpan());
+            WriteRaw(byteSpan);
         }
     }
 
