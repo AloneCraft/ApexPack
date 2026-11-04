@@ -11,21 +11,37 @@ namespace ApexPack;
 /// </summary>
 public static class ApexPackSerializer
 {
+    [ThreadStatic]
+    private static byte[]? t_threadBuffer;
+
+    private const int ThreadBufferSize = 65536;
+
     /// <summary>
-    /// Serializes a value into a byte array with zero-cost default mode.
+    /// Serializes a value into a byte array with thread-local buffer fast-path.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static byte[] Serialize<T>(scoped in T value) where T : ISerializePackable<T>
     {
-        var writer = new ApexBufferWriter(256);
+        var buffer = t_threadBuffer ??= new byte[ThreadBufferSize];
+        var writer = new ApexSpanWriter(buffer);
         try
         {
             T.Serialize(ref writer, in value);
-            return writer.ToArray();
+            return writer.WrittenSpan.ToArray();
         }
-        finally
+        catch (InvalidOperationException)
         {
-            writer.Dispose();
+            // Fallback for objects larger than thread buffer
+            var expandingWriter = new ApexBufferWriter(ThreadBufferSize * 2);
+            try
+            {
+                T.Serialize(ref expandingWriter, in value);
+                return expandingWriter.ToArray();
+            }
+            finally
+            {
+                expandingWriter.Dispose();
+            }
         }
     }
 

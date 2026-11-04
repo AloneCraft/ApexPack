@@ -1,25 +1,31 @@
 using System;
 using System.Diagnostics;
+using MemoryPack;
 using ApexPack;
 using ApexPack.Buffers;
 using ApexPack.Parallel;
 
 namespace ApexPack.Benchmarks;
 
+[MemoryPackable]
 [ApexPackable]
-public partial struct BenchmarkVector
+public partial class Person
 {
-    public float X, Y, Z;
+    public int Age { get; set; }
+    public string Name { get; set; } = "";
 }
 
+[MemoryPackable]
 [ApexPackable]
-public partial class BenchmarkEntity
+public partial class SparseData
 {
     public int Id { get; set; }
-    public string Name { get; set; } = "";
-    public bool FlagA { get; set; }
-    public bool FlagB { get; set; }
-    public int? NullableCount { get; set; }
+    public bool Flag1 { get; set; }
+    public bool Flag2 { get; set; }
+    public bool Flag3 { get; set; }
+    public bool Flag4 { get; set; }
+    public int? NullableInt1 { get; set; }
+    public int? NullableInt2 { get; set; }
     public string? OptionalDescription { get; set; }
 }
 
@@ -27,80 +33,126 @@ public static class Program
 {
     public static void Main(string[] args)
     {
-        Console.WriteLine("=== ApexPack High Performance Benchmark Demonstration ===");
-        Console.WriteLine($"Hardware acceleration status: AVX2/Vector256={ApexPack.Hardware.HardwareIntrinsics.HasVector256}, BMI2={ApexPack.Hardware.HardwareIntrinsics.HasBmi2}");
+        Console.WriteLine("==========================================================================");
+        Console.WriteLine("          ApexPack vs MemoryPack Head-to-Head Performance Benchmark        ");
+        Console.WriteLine("==========================================================================");
+        Console.WriteLine($"Hardware SIMD Acceleration: AVX2/Vector256={ApexPack.Hardware.HardwareIntrinsics.HasVector256}, BMI2={ApexPack.Hardware.HardwareIntrinsics.HasBmi2}");
         Console.WriteLine();
 
-        // 1. Bit-packing size comparison demonstration
-        Console.WriteLine("--- 1. Payload Compaction Demonstration ---");
-        var sparseEntity = new BenchmarkEntity
+        // -----------------------------------------------------------------------
+        // Benchmark 1: Person (Single Object Serialization & Deserialization)
+        // -----------------------------------------------------------------------
+        Console.WriteLine("--- Benchmark 1: Single Object (Person: Age, Name) x 1,000,000 iterations ---");
+        var person = new Person { Age = 32, Name = "Yoshifumi Kawai" };
+
+        const int singleIter = 1_000_000;
+
+        // Warmup
+        MemoryPackSerializer.Deserialize<Person>(MemoryPackSerializer.Serialize(person));
+        ApexPackSerializer.Deserialize<Person>(ApexPackSerializer.Serialize(person));
+
+        // MemoryPack Single Timing
+        var sw = Stopwatch.StartNew();
+        for (int i = 0; i < singleIter; i++)
         {
-            Id = 1,
-            Name = "Player_01",
-            FlagA = true,
-            FlagB = false,
-            NullableCount = null,
-            OptionalDescription = null
-        };
+            var bytes = MemoryPackSerializer.Serialize(person);
+            _ = MemoryPackSerializer.Deserialize<Person>(bytes);
+        }
+        sw.Stop();
+        double mpSingleMs = sw.Elapsed.TotalMilliseconds;
+        Console.WriteLine($"[MemoryPack] {singleIter:N0} roundtrips in {mpSingleMs:F2} ms ({(singleIter / (mpSingleMs / 1000)):N0} ops/sec)");
 
-        byte[] sparseBytes = ApexPackSerializer.Serialize(sparseEntity);
-        Console.WriteLine($"Sparse entity (with nulls & bools) serialized size: {sparseBytes.Length} bytes");
-
-        // 2. Multi-core Parallel Scaling Demonstration
+        // ApexPack Single Timing (using static abstract inlined dispatch)
+        sw.Restart();
+        for (int i = 0; i < singleIter; i++)
+        {
+            var bytes = ApexPackSerializer.Serialize(person);
+            _ = ApexPackSerializer.Deserialize<Person>(bytes);
+        }
+        sw.Stop();
+        double apexSingleMs = sw.Elapsed.TotalMilliseconds;
+        Console.WriteLine($"[ApexPack]   {singleIter:N0} roundtrips in {apexSingleMs:F2} ms ({(singleIter / (apexSingleMs / 1000)):N0} ops/sec)");
+        Console.WriteLine($"-> Speedup: {mpSingleMs / apexSingleMs:F2}x");
         Console.WriteLine();
-        Console.WriteLine("--- 2. Multi-Core Parallel Scaling (100,000 Entities) ---");
-        const int count = 100_000;
-        var entities = new BenchmarkEntity[count];
-        for (int i = 0; i < count; i++)
+
+        // -----------------------------------------------------------------------
+        // Benchmark 2: Sparse Nullable / Boolean Bit-Packing Comparison
+        // -----------------------------------------------------------------------
+        Console.WriteLine("--- Benchmark 2: Bit-Packing Payload Compaction (10,000 Sparse Objects) ---");
+        const int sparseCount = 10_000;
+        var sparseList = new SparseData[sparseCount];
+        for (int i = 0; i < sparseCount; i++)
         {
-            entities[i] = new BenchmarkEntity
+            sparseList[i] = new SparseData
             {
                 Id = i,
-                Name = $"Entity_{i}",
-                FlagA = (i % 2 == 0),
-                FlagB = (i % 3 == 0),
-                NullableCount = (i % 5 == 0) ? i : null,
-                OptionalDescription = (i % 7 == 0) ? "Description" : null
+                Flag1 = (i % 2 == 0),
+                Flag2 = false,
+                Flag3 = (i % 3 == 0),
+                Flag4 = false,
+                NullableInt1 = (i % 4 == 0) ? i : null,
+                NullableInt2 = null,
+                OptionalDescription = (i % 5 == 0) ? "Description" : null
             };
         }
 
-        // Sequential timing
-        var sw = Stopwatch.StartNew();
-        byte[] seqBytes;
-        var writer = new ApexBufferWriter(count * 32);
+        byte[] mpSparseBytes = MemoryPackSerializer.Serialize(sparseList);
+        byte[] apexSparseBytes = ApexPackParallel.Serialize(sparseList, chunkSize: 2048);
+
+        Console.WriteLine($"MemoryPack Total Payload Size: {mpSparseBytes.Length:N0} bytes ({mpSparseBytes.Length / 1024.0:F1} KB)");
+        Console.WriteLine($"ApexPack   Total Payload Size: {apexSparseBytes.Length:N0} bytes ({apexSparseBytes.Length / 1024.0:F1} KB)");
+        double sizeReduction = (1.0 - (double)apexSparseBytes.Length / mpSparseBytes.Length) * 100.0;
+        Console.WriteLine($"-> Bit-Packing Size Reduction: {sizeReduction:F1}% smaller payload than MemoryPack!");
+        Console.WriteLine();
+
+        // -----------------------------------------------------------------------
+        // Benchmark 3: Large Collection (100,000 Persons)
+        // -----------------------------------------------------------------------
+        Console.WriteLine("--- Benchmark 3: Large Collection (100,000 Persons) Serialization & Deserialization ---");
+        const int largeCount = 100_000;
+        var largePersons = new Person[largeCount];
+        for (int i = 0; i < largeCount; i++)
+        {
+            largePersons[i] = new Person { Age = i % 100, Name = $"Person_{i}" };
+        }
+
+        // MemoryPack (Sequential)
+        sw.Restart();
+        byte[] mpLargeBytes = MemoryPackSerializer.Serialize(largePersons);
+        var mpRestored = MemoryPackSerializer.Deserialize<Person[]>(mpLargeBytes);
+        sw.Stop();
+        double mpLargeMs = sw.Elapsed.TotalMilliseconds;
+        Console.WriteLine($"[MemoryPack (Sequential)]    100,000 items in {mpLargeMs:F2} ms ({(largeCount / (mpLargeMs / 1000)):N0} items/sec)");
+
+        // ApexPack (Sequential Fast-Path)
+        sw.Restart();
+        byte[] apexSeqBytes;
+        var seqWriter = new ApexBufferWriter(largeCount * 32);
         try
         {
-            for (int i = 0; i < count; i++)
-            {
-                BenchmarkEntity.Serialize(ref writer, in entities[i]);
-            }
-            seqBytes = writer.ToArray();
+            ApexPackSerializer.SerializeArray(ref seqWriter, largePersons);
+            apexSeqBytes = seqWriter.ToArray();
         }
         finally
         {
-            writer.Dispose();
+            seqWriter.Dispose();
         }
+        var seqReader = new ApexSpanReader(apexSeqBytes);
+        var apexSeqRestored = ApexPackSerializer.DeserializeArray<Person, ApexSpanReader>(ref seqReader);
         sw.Stop();
-        double seqMs = sw.Elapsed.TotalMilliseconds;
-        Console.WriteLine($"[Sequential (1 Core)]   100,000 items in {seqMs:F2} ms (Throughput: {count / (seqMs / 1000):N0} items/sec, {(seqBytes.Length / 1024.0 / 1024.0) / (seqMs / 1000):F2} MB/s)");
+        double apexSeqMs = sw.Elapsed.TotalMilliseconds;
+        Console.WriteLine($"[ApexPack (Sequential)]      100,000 items in {apexSeqMs:F2} ms ({(largeCount / (apexSeqMs / 1000)):N0} items/sec)");
 
-        // Parallel timing
+        // ApexPack (Parallel Multi-Core Pipeline)
         sw.Restart();
-        byte[] parBytes = ApexPackParallel.Serialize(entities, chunkSize: 4096);
+        byte[] apexLargeBytes = ApexPackParallel.Serialize(largePersons, chunkSize: 8192);
+        var apexRestored = ApexPackParallel.Deserialize<Person>(apexLargeBytes, chunkSize: 8192);
         sw.Stop();
-        double parMs = sw.Elapsed.TotalMilliseconds;
-        Console.WriteLine($"[Parallel (Multi-Core)] 100,000 items in {parMs:F2} ms (Throughput: {count / (parMs / 1000):N0} items/sec, {(parBytes.Length / 1024.0 / 1024.0) / (parMs / 1000):F2} MB/s)");
-
-        double speedup = seqMs / parMs;
-        Console.WriteLine($"-> Parallel Speedup: {speedup:F2}x faster!");
-
-        // Parallel Deserialization timing
-        sw.Restart();
-        var deserialized = ApexPackParallel.Deserialize<BenchmarkEntity>(parBytes, chunkSize: 4096);
-        sw.Stop();
-        Console.WriteLine($"[Parallel Deserialization] 100,000 items in {sw.Elapsed.TotalMilliseconds:F2} ms (Count: {deserialized.Length:N0})");
+        double apexLargeMs = sw.Elapsed.TotalMilliseconds;
+        Console.WriteLine($"[ApexPack (Parallel APXP)]   100,000 items in {apexLargeMs:F2} ms ({(largeCount / (apexLargeMs / 1000)):N0} items/sec)");
 
         Console.WriteLine();
-        Console.WriteLine("All benchmark tests completed successfully!");
+        Console.WriteLine("==========================================================================");
+        Console.WriteLine("All head-to-head comparisons completed successfully.");
     }
 }
