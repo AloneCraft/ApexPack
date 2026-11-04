@@ -450,7 +450,7 @@ public class ApexPackGenerator : IIncrementalGenerator
             }
             else
             {
-                sb.AppendLine($"        ApexPackSerializer.SerializeArray(ref writer, {access});");
+                sb.AppendLine($"        ApexPackSerializer.SerializeArrayWithTracker(ref writer, {access}, ref tracker);");
             }
             return;
         }
@@ -464,7 +464,7 @@ public class ApexPackGenerator : IIncrementalGenerator
             }
             else
             {
-                sb.AppendLine($"        ApexPackSerializer.SerializeList(ref writer, {access});");
+                sb.AppendLine($"        ApexPackSerializer.SerializeListWithTracker(ref writer, {access}, ref tracker);");
             }
             return;
         }
@@ -527,7 +527,7 @@ public class ApexPackGenerator : IIncrementalGenerator
             }
             else
             {
-                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeArray<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader>(ref reader);");
+                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeArrayWithTracker<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader, TTracker>(ref reader, ref tracker);");
             }
             return;
         }
@@ -541,7 +541,7 @@ public class ApexPackGenerator : IIncrementalGenerator
             }
             else
             {
-                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeList<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader>(ref reader);");
+                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeListWithTracker<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader, TTracker>(ref reader, ref tracker);");
             }
             return;
         }

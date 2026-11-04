@@ -105,11 +105,12 @@ public static class ApexPackSerializer
     }
 
     /// <summary>
-    /// Serializes an array of packable items.
+    /// Serializes an array of packable items with reference tracking support.
     /// </summary>
-    public static void SerializeArray<T, TWriter>(ref TWriter writer, T[]? items)
+    public static void SerializeArrayWithTracker<T, TWriter, TTracker>(ref TWriter writer, T[]? items, ref TTracker tracker)
         where T : ISerializePackable<T>
         where TWriter : IApexBufferWriter, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
     {
         if (items is null)
         {
@@ -121,16 +122,17 @@ public static class ApexPackSerializer
         writer.WriteInt32(count);
         for (int i = 0; i < count; i++)
         {
-            T.Serialize(ref writer, in items[i]);
+            T.SerializeWithTracker(ref writer, in items[i], ref tracker);
         }
     }
 
     /// <summary>
-    /// Deserializes an array of packable items.
+    /// Deserializes an array of packable items with reference tracking support.
     /// </summary>
-    public static T[]? DeserializeArray<T, TReader>(ref TReader reader)
+    public static T[]? DeserializeArrayWithTracker<T, TReader, TTracker>(ref TReader reader, ref TTracker tracker)
         where T : ISerializePackable<T>
         where TReader : IApexBufferReader, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
     {
         int count = reader.ReadInt32();
         if (count == -1) return null;
@@ -139,17 +141,18 @@ public static class ApexPackSerializer
         var array = new T[count];
         for (int i = 0; i < count; i++)
         {
-            T.Deserialize(ref reader, out array[i]);
+            T.DeserializeWithTracker(ref reader, out array[i], ref tracker);
         }
         return array;
     }
 
     /// <summary>
-    /// Serializes a generic List&lt;T&gt; of packable items.
+    /// Serializes a generic List&lt;T&gt; of packable items with reference tracking support.
     /// </summary>
-    public static void SerializeList<T, TWriter>(ref TWriter writer, List<T>? items)
+    public static void SerializeListWithTracker<T, TWriter, TTracker>(ref TWriter writer, List<T>? items, ref TTracker tracker)
         where T : ISerializePackable<T>
         where TWriter : IApexBufferWriter, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
     {
         if (items is null)
         {
@@ -162,16 +165,17 @@ public static class ApexPackSerializer
         for (int i = 0; i < count; i++)
         {
             var item = items[i];
-            T.Serialize(ref writer, in item);
+            T.SerializeWithTracker(ref writer, in item, ref tracker);
         }
     }
 
     /// <summary>
-    /// Deserializes a generic List&lt;T&gt; of packable items.
+    /// Deserializes a generic List&lt;T&gt; of packable items with reference tracking support.
     /// </summary>
-    public static List<T>? DeserializeList<T, TReader>(ref TReader reader)
+    public static List<T>? DeserializeListWithTracker<T, TReader, TTracker>(ref TReader reader, ref TTracker tracker)
         where T : ISerializePackable<T>
         where TReader : IApexBufferReader, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
     {
         int count = reader.ReadInt32();
         if (count == -1) return null;
@@ -180,7 +184,7 @@ public static class ApexPackSerializer
         var list = new List<T>(count);
         for (int i = 0; i < count; i++)
         {
-            T.Deserialize(ref reader, out var item);
+            T.DeserializeWithTracker(ref reader, out var item, ref tracker);
             list.Add(item);
         }
         return list;
