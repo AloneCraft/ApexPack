@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ApexPack.Core/ApexPack.Core.csproj" />
+    <Project Path="src/ApexPack.Generator/ApexPack.Generator.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ApexPack.Tests/ApexPack.Tests.csproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/ApexPack.Benchmarks/ApexPack.Benchmarks.csproj" />
+  </Folder>
+</Solution>

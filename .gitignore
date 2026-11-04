@@ -1,0 +1,14 @@
+## Build and bin folders
+bin/
+obj/
+artifacts/
+
+## IDE and OS
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+Thumbs.db
