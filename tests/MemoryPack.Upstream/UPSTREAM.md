@@ -42,6 +42,10 @@ MemoryPack のジェネレーター本体(`MemoryPack.Generator.MemoryPackGenera
 
 - テストファイルは namespace `MemoryPack.Tests` の中で `MemoryPackSerializer` を使う。C# はこの名前を「`MemoryPack.Tests` の型 → 外側の `MemoryPack` の型 → using」の順に探すので、global using の別名では横取りできない。Harness は同じ名前の型を `MemoryPack.Tests` に置き、そこから `global::MemoryPack.MemoryPackSerializer`(各プロジェクトの MemoryPack)を呼ぶ。
 - 時間はテスト中には測らない。テスト中の Serialize / Deserialize 呼び出しを記録し、テストの後に繰り返し再生して、1 回あたりの最小値を採る。直列化の出力をそのまま逆直列化した呼び出しは、二重に数えない。
+- 再生は「全テストの実行と確認 → 全記録をまとめて暖機(3 回)→ コンパイル済みメソッド数が増えなくなるまで待つ → 計測」の順に行う。.NET の段階的コンパイルが最適化を終える前に測ると、数 ns の処理で 2〜10 倍ずれるため。
+- 時間の再生は、各ライブラリの公開 API を直接呼ぶ(MemoryPack 側は `MemoryPackSerializer`、ApexPack 側は互換層を通さず `ApexPackSerializer`)。互換層の入口は ApexPack の例外を `MemoryPackSerializationException` に包むため try/catch を持ち、1 回あたり 3〜5 ns かかる。これは ApexPack の性能ではないので含めない。テストの実行と、再現性・往復の確認は互換層を通す。
+- 呼び出しはインライン展開しない 1 回の呼び出しとして測り、結果は必ず保持する(結果を捨てると、固定長の読み取りなどが最適化で消える)。
+- この PC のように他の処理の負荷が高い環境では、全件の実行ごとに数 ns の呼び出しが ±数十 % ずれる。テストごとの倍率の幾何平均で見る。合計時間の比は、大きな多次元配列のテスト 1 件が大半を占めるので目安にとどめる。
 - 実行: `dotnet run --project tests/Upstream.Runner -c Release -- --build`(結果はリポジトリ直下の `upstream_report.json`)。比較画面は `benchmarks/ApexPack.BenchmarkGui` の「MemoryPack テスト比較」タブ。
 
 ## 判定

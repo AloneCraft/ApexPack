@@ -69,7 +69,13 @@ public static class Recorder
     }
 }
 
-/// <summary>記録した呼び出し 1 件。</summary>
+/// <summary>
+/// 記録した呼び出し 1 件。テストの後に、確認(<see cref="Check"/>)→ 暖機(<see cref="Warm"/>)→ 計測(<see cref="Measure"/>)の順に再生する。
+/// </summary>
+/// <remarks>
+/// .NET は呼び出しの回数と時間がたまるまで最適化の弱いコードで動く(段階的コンパイル)。テストの直後にすぐ測ると、
+/// その途中の状態を測ってしまい、ばらつきも大きい。そこで全記録をまとめて暖機し、最適化が終わるのを待ってから測る。
+/// </remarks>
 public abstract class CallRecord
 {
     public abstract string Op { get; }
@@ -79,6 +85,9 @@ public abstract class CallRecord
     /// <summary>直列化後のバイト列(重複除去に使う)。直列化できなければ null。直列化の記録では <see cref="Prepare"/> で作る。</summary>
     public byte[]? Bytes { get; protected set; }
 
+    /// <summary>確認が通り、計測できる状態か。</summary>
+    protected bool Ready { get; private set; }
+
     /// <summary>
     /// テストの後に呼ぶ。直列化の記録はここで初めて直列化する(テスト中に余計な直列化をすると、コールバックのログなどテストの観測が変わるため)。
     /// </summary>
@@ -86,13 +95,14 @@ public abstract class CallRecord
     {
     }
 
-    /// <summary>テスト後に呼び出しを再生して、時間・再現性・往復を測る。</summary>
-    public CallResult Replay(bool timing)
+    /// <summary>再現性(同じ入力で同じバイト列)と往復(直列化 → 逆直列化 → 直列化で同じバイト列)を確かめ、計測の準備をする。</summary>
+    public CallResult Check()
     {
         var result = new CallResult { Op = Op, Type = TypeName };
         try
         {
-            ReplayCore(result, timing);
+            CheckCore(result);
+            Ready = true;
         }
         catch (Exception e)
         {
@@ -101,7 +111,51 @@ public abstract class CallRecord
         return result;
     }
 
-    protected abstract void ReplayCore(CallResult result, bool timing);
+    protected abstract void CheckCore(CallResult result);
+
+    /// <summary>直列化を n 回実行し、経過した Stopwatch の刻みを返す。</summary>
+    protected abstract long RunSerialize(int n);
+
+    /// <summary>逆直列化を n 回実行し、経過した Stopwatch の刻みを返す。</summary>
+    protected abstract long RunDeserialize(int n);
+
+    /// <summary>最適化が進むよう、決まった回数か決まった時間だけ呼ぶ。</summary>
+    public void Warm(int calls, double milliseconds)
+    {
+        if (!Ready) return;
+        try
+        {
+            WarmOne(RunSerialize, calls, milliseconds);
+            WarmOne(RunDeserialize, calls, milliseconds);
+        }
+        catch (Exception)
+        {
+            Ready = false;
+        }
+    }
+
+    private static void WarmOne(Func<int, long> run, int calls, double milliseconds)
+    {
+        long limit = (long)(Stopwatch.Frequency * milliseconds / 1000.0);
+        long spent = 0;
+        for (int i = 0; i < calls && spent < limit; i++) spent += run(1);
+    }
+
+    /// <summary>1 回あたりの時間を測って <paramref name="result"/> に書く。</summary>
+    public void Measure(CallResult result)
+    {
+        if (!Ready) return;
+        try
+        {
+            result.SerializeNs = ReplayTimer.MeasureNs(RunSerialize);
+            result.DeserializeNs = ReplayTimer.MeasureNs(RunDeserialize);
+        }
+        catch (Exception e)
+        {
+            result.SerializeNs = result.DeserializeNs = -1;
+            result.ReplayError = $"{e.GetType().Name}: {e.Message}";
+        }
+    }
 
     protected static bool Same(byte[]? a, byte[]? b) => a is not null && b is not null && a.AsSpan().SequenceEqual(b);
 
@@ -123,6 +177,7 @@ public sealed class SerializeRecord<T> : CallRecord
 {
     private readonly T? _value;
     private readonly Options? _options;
+    private byte[] _serialized = Array.Empty<byte>();
 
     public SerializeRecord(T? value, Options? options)
     {
@@ -146,7 +201,7 @@ public sealed class SerializeRecord<T> : CallRecord
 
     public override string TypeName => Describe(typeof(T));
 
-    protected override void ReplayCore(CallResult result, bool timing)
+    protected override void CheckCore(CallResult result)
     {
         var first = Backend.Serialize(in _value, _options);
         var second = Backend.Serialize(in _value, _options);
@@ -154,20 +209,24 @@ public sealed class SerializeRecord<T> : CallRecord
         result.Deterministic = Same(first, second);
         var restored = Backend.Deserialize<T>(first, _options);
         result.RoundTrip = Same(first, Backend.Serialize(in restored, _options));
-        if (!timing) return;
+        _serialized = first;
+    }
 
-        result.SerializeNs = ReplayTimer.MeasureNs(n =>
-        {
-            long start = Stopwatch.GetTimestamp();
-            for (int i = 0; i < n; i++) Backend.Serialize(in _value, _options);
-            return Stopwatch.GetTimestamp() - start;
-        });
-        result.DeserializeNs = ReplayTimer.MeasureNs(n =>
-        {
-            long start = Stopwatch.GetTimestamp();
-            for (int i = 0; i < n; i++) Backend.Deserialize<T>(first, _options);
-            return Stopwatch.GetTimestamp() - start;
-        });
+    protected override long RunSerialize(int n)
+    {
+        long start = Stopwatch.GetTimestamp();
+        for (int i = 0; i < n; i++) Direct.SinkLength = Direct.Serialize(in _value, _options).Length;
+        return Stopwatch.GetTimestamp() - start;
+    }
+
+    protected override long RunDeserialize(int n)
+    {
+        var bytes = _serialized;
+        long start = Stopwatch.GetTimestamp();
+        T? last = default;
+        for (int i = 0; i < n; i++) last = Direct.Deserialize<T>(bytes, _options);
+        Direct.Sink = last;
+        return Stopwatch.GetTimestamp() - start;
     }
 }
 
@@ -175,6 +234,7 @@ public sealed class SerializeRecord<T> : CallRecord
 public sealed class DeserializeRecord<T> : CallRecord
 {
     private readonly Options? _options;
+    private T? _value;
 
     public DeserializeRecord(byte[] bytes, Options? options)
     {
@@ -186,28 +246,31 @@ public sealed class DeserializeRecord<T> : CallRecord
 
     public override string TypeName => Describe(typeof(T));
 
-    protected override void ReplayCore(CallResult result, bool timing)
+    protected override void CheckCore(CallResult result)
     {
         var bytes = Bytes!;
         result.Bytes = bytes.Length;
-        var value = Backend.Deserialize<T>(bytes, _options);
-        var first = Backend.Serialize(in value, _options);
-        result.Deterministic = Same(first, Backend.Serialize(in value, _options));
+        _value = Backend.Deserialize<T>(bytes, _options);
+        var first = Backend.Serialize(in _value, _options);
+        result.Deterministic = Same(first, Backend.Serialize(in _value, _options));
         result.RoundTrip = Same(first, bytes);
-        if (!timing) return;
+    }
 
-        result.DeserializeNs = ReplayTimer.MeasureNs(n =>
-        {
-            long start = Stopwatch.GetTimestamp();
-            for (int i = 0; i < n; i++) Backend.Deserialize<T>(bytes, _options);
-            return Stopwatch.GetTimestamp() - start;
-        });
-        result.SerializeNs = ReplayTimer.MeasureNs(n =>
-        {
-            long start = Stopwatch.GetTimestamp();
-            for (int i = 0; i < n; i++) Backend.Serialize(in value, _options);
-            return Stopwatch.GetTimestamp() - start;
-        });
+    protected override long RunSerialize(int n)
+    {
+        long start = Stopwatch.GetTimestamp();
+        for (int i = 0; i < n; i++) Direct.SinkLength = Direct.Serialize(in _value, _options).Length;
+        return Stopwatch.GetTimestamp() - start;
+    }
+
+    protected override long RunDeserialize(int n)
+    {
+        var bytes = Bytes!;
+        long start = Stopwatch.GetTimestamp();
+        T? last = default;
+        for (int i = 0; i < n; i++) last = Direct.Deserialize<T>(bytes, _options);
+        Direct.Sink = last;
+        return Stopwatch.GetTimestamp() - start;
     }
 }
 
@@ -215,9 +278,10 @@ public sealed class DeserializeRecord<T> : CallRecord
 public sealed class ObjectRecord : CallRecord
 {
     private readonly Type _type;
-    private readonly object? _value;
     private readonly bool _isSerialize;
     private readonly Options? _options;
+    private object? _value;
+    private byte[] _serialized = Array.Empty<byte>();
 
     public ObjectRecord(Type type, object? value, byte[]? bytes, Options? options)
     {
@@ -245,29 +309,61 @@ public sealed class ObjectRecord : CallRecord
 
     public override string TypeName => Describe(_type);
 
-    protected override void ReplayCore(CallResult result, bool timing)
+    protected override void CheckCore(CallResult result)
     {
-        object? value = _isSerialize ? _value : Backend.Deserialize(_type, Bytes!, _options);
-        var first = _isSerialize ? Backend.Serialize(_type, value, _options) : Bytes!;
+        if (!_isSerialize) _value = Backend.Deserialize(_type, Bytes!, _options);
+        var first = _isSerialize ? Backend.Serialize(_type, _value, _options) : Bytes!;
         result.Bytes = first.Length;
-        result.Deterministic = Same(Backend.Serialize(_type, value, _options), Backend.Serialize(_type, value, _options));
+        result.Deterministic = Same(Backend.Serialize(_type, _value, _options), Backend.Serialize(_type, _value, _options));
         var restored = Backend.Deserialize(_type, first, _options);
         result.RoundTrip = Same(first, Backend.Serialize(_type, restored, _options));
-        if (!timing) return;
-
-        result.SerializeNs = ReplayTimer.MeasureNs(n =>
-        {
-            long start = Stopwatch.GetTimestamp();
-            for (int i = 0; i < n; i++) Backend.Serialize(_type, value, _options);
-            return Stopwatch.GetTimestamp() - start;
-        });
-        result.DeserializeNs = ReplayTimer.MeasureNs(n =>
-        {
-            long start = Stopwatch.GetTimestamp();
-            for (int i = 0; i < n; i++) Backend.Deserialize(_type, first, _options);
-            return Stopwatch.GetTimestamp() - start;
-        });
+        _serialized = first;
     }
+
+    protected override long RunSerialize(int n)
+    {
+        long start = Stopwatch.GetTimestamp();
+        for (int i = 0; i < n; i++) Direct.SinkLength = Backend.Serialize(_type, _value, _options).Length;
+        return Stopwatch.GetTimestamp() - start;
+    }
+
+    protected override long RunDeserialize(int n)
+    {
+        var bytes = _serialized;
+        long start = Stopwatch.GetTimestamp();
+        object? last = null;
+        for (int i = 0; i < n; i++) last = Backend.Deserialize(_type, bytes, _options);
+        Direct.Sink = last;
+        return Stopwatch.GetTimestamp() - start;
+    }
+}
+
+/// <summary>
+/// 時間の再生で呼ぶ入口。各ライブラリの公開 API を直接呼ぶ: MemoryPack 側は MemoryPackSerializer、
+/// ApexPack 側は互換層を通さず ApexPackSerializer(互換層の、例外を MemoryPack の型に包む処理の分を含めないため)。
+/// テストそのものと、再現性・往復の確認は互換層を通す。
+/// </summary>
+internal static class Direct
+{
+    // 結果を捨てると、最適化で処理ごと消されることがある(固定長の値の読み取りなど)。必ずここへ書く
+    public static object? Sink;
+    public static int SinkLength;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    public static byte[] Serialize<T>(in T? value, Options? options)
+#if APEXPACK_BACKEND
+        => global::ApexPack.ApexPackSerializer.Serialize<T>(value!);
+#else
+        => Backend.Serialize(in value, options);
+#endif
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    public static T? Deserialize<T>(byte[] bytes, Options? options)
+#if APEXPACK_BACKEND
+        => global::ApexPack.ApexPackSerializer.Deserialize<T>(bytes);
+#else
+        => Backend.Deserialize<T>(bytes, options);
+#endif
 }
 
 /// <summary>繰り返し実行して 1 回あたりの時間を測る。</summary>
@@ -277,14 +373,11 @@ public static class ReplayTimer
     public static double BatchMilliseconds { get; set; } = 3;
 
     /// <summary>計測区間の数。最小値を採用する。</summary>
-    public static int Batches { get; set; } = 5;
+    public static int Batches { get; set; } = 7;
 
     /// <summary><paramref name="run"/> は n 回実行して経過した Stopwatch の刻みを返す。</summary>
     public static double MeasureNs(Func<int, long> run)
     {
-        run(1); // 初回(JIT など)を除く
-        run(4);
-
         // 1 区間がおよそ BatchMilliseconds になる回数を決める
         int n = 1;
         long target = (long)(Stopwatch.Frequency * BatchMilliseconds / 1000.0);

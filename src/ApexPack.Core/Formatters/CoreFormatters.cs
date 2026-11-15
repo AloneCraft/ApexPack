@@ -94,6 +94,9 @@ public readonly struct PackableFormatter<T> : IApexFormatter<T> where T : ISeria
     /// </summary>
     public static int MinWireSize => typeof(T).IsValueType ? T.ApexMinBodySize : 1;
 
+    /// <summary>追跡なしで書くバイト数が分かるなら返す(null を取り得る位置の形式。ルートで使う)。</summary>
+    public static int ExactSize(scoped in T value) => T.ApexExactSize(in value);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteFixed(ref byte destination, scoped in T value, bool littleEndian) => T.WriteFixed(ref destination, in value, littleEndian);
 

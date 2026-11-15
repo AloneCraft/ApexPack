@@ -31,6 +31,13 @@ public readonly struct ArrayFormatter<T, TF> : IApexFormatter<T[]?>
     {
         return ApexSequence.ReadArray<TReader, TTracker, TGuard, T, TF>(ref reader, ref tracker, ref guard);
     }
+
+    /// <summary>要素のメモリ表現(LE)がワイヤ形式と一致するなら要素のバイト数。</summary>
+    public static int RawElementSize => TF.FixedSize > 0 && TF.IsRawLayout ? TF.FixedSize : -1;
+
+    /// <summary>要素が固定長なら、件数ヘッダー + 件数 × 固定長。</summary>
+    public static int ExactSize(scoped in T[]? value)
+        => value is null ? 1 : TF.FixedSize >= 0 ? ApexWire.CompactSize((uint)value.Length + 1) + value.Length * TF.FixedSize : -1;
 }
 
 /// <summary>List&lt;T&gt;。</summary>
@@ -52,6 +59,10 @@ public readonly struct ListFormatter<T, TF> : IApexFormatter<List<T>?>
     {
         return ApexSequence.ReadList<TReader, TTracker, TGuard, T, TF>(ref reader, ref tracker, ref guard);
     }
+
+    /// <summary>要素が固定長なら、件数ヘッダー + 件数 × 固定長。</summary>
+    public static int ExactSize(scoped in List<T>? value)
+        => value is null ? 1 : TF.FixedSize >= 0 ? ApexWire.CompactSize((uint)value.Count + 1) + value.Count * TF.FixedSize : -1;
 }
 
 /// <summary>Memory&lt;T&gt;(null は空として扱う)。</summary>
@@ -630,7 +641,8 @@ public readonly struct ImmutableListFormatter<T, TF> : IApexFormatter<ImmutableL
         where TTracker : IReferenceTracker, allows ref struct
     {
         if (value is null) { writer.WriteNullCollectionHeader(); return; }
-        ApexSequence.WriteCollection<TWriter, TTracker, T, TF>(ref writer, value, ref tracker);
+        writer.WriteCollectionHeader(value.Count);
+        foreach (var element in value) { T item = element; TF.Write(ref writer, in item, ref tracker); }
     }
 
     public static ImmutableList<T>? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
@@ -696,7 +708,8 @@ public readonly struct ImmutableHashSetFormatter<T, TF> : IApexFormatter<Immutab
         where TTracker : IReferenceTracker, allows ref struct
     {
         if (value is null) { writer.WriteNullCollectionHeader(); return; }
-        ApexSequence.WriteCollection<TWriter, TTracker, T, TF>(ref writer, value, ref tracker);
+        writer.WriteCollectionHeader(value.Count);
+        foreach (var element in value) { T item = element; TF.Write(ref writer, in item, ref tracker); }
     }
 
     public static ImmutableHashSet<T>? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
@@ -718,7 +731,8 @@ public readonly struct ImmutableSortedSetFormatter<T, TF> : IApexFormatter<Immut
         where TTracker : IReferenceTracker, allows ref struct
     {
         if (value is null) { writer.WriteNullCollectionHeader(); return; }
-        ApexSequence.WriteCollection<TWriter, TTracker, T, TF>(ref writer, value, ref tracker);
+        writer.WriteCollectionHeader(value.Count);
+        foreach (var element in value) { T item = element; TF.Write(ref writer, in item, ref tracker); }
     }
 
     public static ImmutableSortedSet<T>? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)

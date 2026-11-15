@@ -474,6 +474,10 @@ internal sealed class TypeAnalyzer
         }
 
         CollectCallbacks(model);
+        model.ConditionalFixed = model.IsValueType && model.Kind == PackKind.Object && symbol.IsGenericType && model.MaskBytes == 0
+            && model.OnSerializing.Count + model.OnSerialized.Count + model.OnDeserializing.Count + model.OnDeserialized.Count == 0
+            && model.Members.All(m => m.Encoding == MemberEncoding.Fixed || (m.Encoding == MemberEncoding.Variable && m.Type is ITypeParameterSymbol))
+            && model.Members.Any(m => m.Type is ITypeParameterSymbol);
         return model;
     }
 
@@ -646,6 +650,34 @@ internal sealed class TypeAnalyzer
         var element = collection.TypeArguments[0];
         model.CollectionElement = Name(element);
         model.CollectionElementFormatter = Formatter(element, symbol);
+
+        // 具象型のメソッドを直接呼べるか(インターフェース経由の呼び出しと列挙子の箱詰めを避ける)
+        for (var b = symbol.BaseType; b is not null; b = b.BaseType)
+        {
+            if (b.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.List<T>"
+                && SymbolEqualityComparer.Default.Equals(b.TypeArguments[0], element))
+            {
+                model.CollectionIsList = true;
+                break;
+            }
+        }
+        var methods = new List<IMethodSymbol>();
+        for (INamedTypeSymbol? t = symbol; t is not null; t = t.BaseType)
+        {
+            methods.AddRange(t.GetMembers().OfType<IMethodSymbol>().Where(m => !m.IsStatic && m.DeclaredAccessibility == Accessibility.Public));
+        }
+        if (methods.Any(m => m.Name == "Add" && m.Parameters.Length == 1 && SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, element)))
+        {
+            model.CollectionAdd = "direct";
+        }
+        else if (element is INamedTypeSymbol kv && kv.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.KeyValuePair<TKey, TValue>"
+            && methods.Any(m => m.Name == "Add" && m.Parameters.Length == 2
+                && SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, kv.TypeArguments[0])
+                && SymbolEqualityComparer.Default.Equals(m.Parameters[1].Type, kv.TypeArguments[1])))
+        {
+            model.CollectionAdd = "keyvalue";
+        }
+        model.CollectionEnsureCapacity = methods.Any(m => m.Name == "EnsureCapacity" && m.Parameters.Length == 1 && m.Parameters[0].Type.SpecialType == SpecialType.System_Int32);
         return true;
     }
 

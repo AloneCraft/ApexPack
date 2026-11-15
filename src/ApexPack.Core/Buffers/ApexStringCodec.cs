@@ -105,6 +105,49 @@ public static class ApexStringCodec
         return FillReversed(new string('\0', (int)length), chars);
     }
 
+    /// <summary>
+    /// 文字列と同じ形式を StringBuilder へ直接読む(中間の string を作らない。大きいと LOH の割り当てになるため)。
+    /// </summary>
+    public static System.Text.StringBuilder? ReadStringBuilder<TReader>(ref TReader reader)
+        where TReader : struct, IApexBufferReader, allows ref struct
+    {
+        uint header = reader.ReadCompactUInt();
+        if (header == 0) return null;
+        if (header == 1) return new System.Text.StringBuilder();
+        uint payload = header - 1;
+        uint length = payload >> 1;
+        Span<char> chunk = stackalloc char[1024];
+        if ((payload & 1) == 0)
+        {
+            if (length > (uint)reader.Remaining) ApexThrowHelper.ThrowInvalidLength((int)Math.Min(length, int.MaxValue));
+            var bytes = MemoryMarshal.CreateReadOnlySpan(in reader.GetSpanRef((int)length), (int)length);
+            var builder = new System.Text.StringBuilder((int)length);
+            for (int offset = 0; offset < bytes.Length; offset += chunk.Length)
+            {
+                int n = Math.Min(chunk.Length, bytes.Length - offset);
+                Encoding.Latin1.GetChars(bytes.Slice(offset, n), chunk);
+                builder.Append(chunk.Slice(0, n));
+            }
+            return builder;
+        }
+
+        if (length > (uint)(reader.Remaining >> 1)) ApexThrowHelper.ThrowInvalidLength((int)Math.Min(length, int.MaxValue));
+        ref readonly byte wide = ref reader.GetSpanRef((int)length * 2);
+        var chars = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<byte, char>(ref Unsafe.AsRef(in wide)), (int)length);
+        var result = new System.Text.StringBuilder((int)length);
+        if (TReader.IsHostLittleEndian)
+        {
+            return result.Append(chars);
+        }
+        for (int offset = 0; offset < chars.Length; offset += chunk.Length)
+        {
+            int n = Math.Min(chunk.Length, chars.Length - offset);
+            ApexEndianHelper.ReverseEndiannessChars(chars.Slice(offset, n), chunk.Slice(0, n));
+            result.Append(chunk.Slice(0, n));
+        }
+        return result;
+    }
+
     private static string FillReversed(string target, ReadOnlySpan<char> source)
     {
         // 生成直後で未公開の文字列なので書き換えてよい

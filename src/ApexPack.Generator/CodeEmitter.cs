@@ -416,7 +416,24 @@ internal sealed class CodeEmitter
         SignatureWrite("SerializeWithTracker");
         Open("");
         L($"if (value is null) {{ {Ext}.WriteNullCollectionHeader(ref writer); return; }}");
-        L($"{Ns}ApexSequence.WriteCollection<TWriter, TTracker, {e}, {f}>(ref writer, value, ref tracker);");
+        if (_m.CollectionIsList)
+        {
+            L($"{Ns}ApexSequence.WriteSpan<TWriter, TTracker, {e}, {f}>(ref writer, global::System.Runtime.InteropServices.CollectionsMarshal.AsSpan(value), ref tracker);");
+        }
+        else
+        {
+            // 具象型で列挙する(列挙子が構造体なら箱詰めしない)。件数と実際の要素数が違えば変更中とみなす
+            L("int __count = value.Count;");
+            L($"{Ext}.WriteCollectionHeader(ref writer, __count);");
+            L("int __written = 0;");
+            Open("foreach (var __item in value)");
+            L("if (__written == __count) break;");
+            L($"var __v = ({e})__item;");
+            L($"{f}.Write(ref writer, in __v, ref tracker);");
+            L("__written++;");
+            Close();
+            L("if (__written != __count) throw new global::System.InvalidOperationException(\"The collection was modified during serialization.\");");
+        }
         Close();
         L();
         SignatureRead("DeserializeGuarded");
@@ -424,9 +441,32 @@ internal sealed class CodeEmitter
         L($"int __n = {Ns}ApexSequence.ReadCount<TReader, TGuard, {e}, {f}>(ref reader, ref guard);");
         L("if (__n < 0) { value = default!; return; }");
         L($"var __c = new {t}();");
-        // ICollection<T>.Add を明示して呼ぶ(Dictionary の派生など、Add(T) が明示的実装の型があるため)
-        L($"var __ic = (global::System.Collections.Generic.ICollection<{e}>)__c;");
-        L($"for (int __i = 0; __i < __n; __i++) __ic.Add({f}.Read(ref reader, ref tracker, ref guard));");
+        if (_m.CollectionIsList)
+        {
+            L("global::System.Runtime.InteropServices.CollectionsMarshal.SetCount(__c, __n);");
+            L($"{Ns}ApexSequence.ReadElements<TReader, TTracker, TGuard, {e}, {f}>(ref reader, global::System.Runtime.InteropServices.CollectionsMarshal.AsSpan(__c), ref tracker, ref guard);");
+        }
+        else
+        {
+            if (_m.CollectionEnsureCapacity) L("__c.EnsureCapacity(__n);");
+            switch (_m.CollectionAdd)
+            {
+                case "direct":
+                    L($"for (int __i = 0; __i < __n; __i++) __c.Add({f}.Read(ref reader, ref tracker, ref guard));");
+                    break;
+                case "keyvalue":
+                    Open("for (int __i = 0; __i < __n; __i++)");
+                    L($"var __kv = {f}.Read(ref reader, ref tracker, ref guard);");
+                    L("__c.Add(__kv.Key, __kv.Value);");
+                    Close();
+                    break;
+                default:
+                    // ICollection<T>.Add を明示して呼ぶ(Add(T) が明示的実装の型があるため)
+                    L($"var __ic = (global::System.Collections.Generic.ICollection<{e}>)__c;");
+                    L($"for (int __i = 0; __i < __n; __i++) __ic.Add({f}.Read(ref reader, ref tracker, ref guard));");
+                    break;
+            }
+        }
         L("value = __c;");
         Close();
     }
@@ -529,6 +569,17 @@ internal sealed class CodeEmitter
         L($"public static {(_m.HidesBaseMinBodySize ? "new " : "")}int ApexMinBodySize => {_m.MinBodySize};");
         L();
 
+        // 可変長メンバーも Nullable 固定長もない型は、書くバイト数が値によらず決まる(クラスの null は 1 バイト)
+        if (!WrapCallbacks && !_m.ConditionalFixed && !VariableMembers.Any() && !NullableFixedMembers.Any())
+        {
+            int body = _m.MaskBytes + _m.FixedBytes;
+            string exact = IsClass
+                ? $"value is null ? 1 : {body + (_m.HasMarkerBit ? 0 : 1)}"
+                : $"{body}";
+            L($"public static int ApexExactSize(scoped in {t} value) => {exact};");
+            L();
+        }
+
         if (IsClass)
         {
             SignatureWrite(Entry("SerializeWithTracker"), access: EntryAccess);
@@ -602,6 +653,25 @@ internal sealed class CodeEmitter
 
             SignatureWrite("__ApexWriteBody", valueModifier: "", access: "private static ");
         }
+        else if (_m.ConditionalFixed)
+        {
+            EmitConditionalFixed();
+            L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+            SignatureWrite(Entry("SerializeWithTracker"), access: EntryAccess);
+            Open("");
+            L("if (__ApexFixed.Size >= 0) { WriteFixed(ref writer.GetSpanRef(__ApexFixed.Size), in value, TWriter.IsHostLittleEndian); return; }");
+            L("__ApexWriteBody(ref writer, in value, ref tracker);");
+            Close();
+            L();
+            L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+            SignatureRead(Entry("DeserializeGuarded"), EntryAccess);
+            Open("");
+            L("if (__ApexFixed.Size >= 0) { value = ReadFixed(in reader.GetSpanRef(__ApexFixed.Size), TReader.IsHostLittleEndian); return; }");
+            L("value = __ApexReadBody(ref reader, ref tracker, ref guard, 0, false);");
+            Close();
+            L();
+            SignatureWrite("__ApexWriteBody", access: "private static ");
+        }
         else
         {
             L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
@@ -624,6 +694,184 @@ internal sealed class CodeEmitter
         Raw(Indent(ReaderConstraints));
         Open("");
         EmitReadBody();
+        Close();
+        EmitRawRunChecks();
+    }
+
+    /// <summary>
+    /// ConditionalFixed: 型引数のメンバーが実行時に固定長なら、構造体全体を固定長として読み書きする。
+    /// 並びは Object と同じ(固定長メンバー → 型引数メンバー)なので、固定長かどうかで形式は変わらない。
+    /// メモリ表現が一致すれば一括コピーする。判定は型ごとの static readonly(Tier1 で定数になる)。
+    /// </summary>
+    private void EmitConditionalFixed()
+    {
+        string t = _m.SelfName;
+        var fixedMembers = FixedMembers.ToList();
+        var typed = VariableMembers.ToList();
+        string Cache(MemberModel m) => $"{Ns}ApexFormatterCache<{m.TypeName}>.Instance";
+        int fixedBytes = fixedMembers.Sum(m => m.Fixed!.Size);
+
+        L("public static int ApexFixedSize => __ApexFixed.Size;");
+        L();
+        L("public static bool ApexIsRawLayout => __ApexFixed.Raw;");
+        L();
+
+        L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+        Open($"public static void WriteFixed(ref byte destination, scoped in {t} value, bool littleEndian)");
+        L($"if (littleEndian && __ApexFixed.Raw) {{ {Un}.WriteUnaligned(ref destination, value); return; }}");
+        int offset = 0;
+        foreach (var m in fixedMembers)
+        {
+            L(WriteFixedValue(m.Fixed!, $"ref {Un}.Add(ref destination, {offset})", $"value.{Esc(m.Name)}", "littleEndian"));
+            offset += m.Fixed!.Size;
+        }
+        L($"int __o = {fixedBytes};");
+        foreach (var m in typed)
+        {
+            L($"{Cache(m)}.WriteFixedRoot(ref {Un}.Add(ref destination, __o), value.{Esc(m.Name)}, littleEndian);");
+            L($"__o += {Cache(m)}.RootFixedSize;");
+        }
+        Close();
+        L();
+
+        L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+        Open($"public static {t} ReadFixed(ref readonly byte source, bool littleEndian)");
+        L($"if (littleEndian && __ApexFixed.Raw) return {Un}.ReadUnaligned<{t}>(in source);");
+        offset = 0;
+        foreach (var m in fixedMembers)
+        {
+            L($"var {m.Local} = {ReadFixedValue(m.Fixed!, $"in {Un}.Add(ref {Un}.AsRef(in source), {offset})", "littleEndian")};");
+            offset += m.Fixed!.Size;
+        }
+        L($"int __o = {fixedBytes};");
+        foreach (var m in typed)
+        {
+            L($"var {m.Local} = {Cache(m)}.ReadFixedRoot(in {Un}.Add(ref {Un}.AsRef(in source), __o), littleEndian);");
+            L($"__o += {Cache(m)}.RootFixedSize;");
+        }
+        L($"return {Construct()};");
+        Close();
+        L();
+
+        Open("private static class __ApexFixed");
+        L("public static readonly int Size = ComputeSize();");
+        L();
+        L("public static readonly bool Raw = ComputeRaw();");
+        L();
+        Open("private static int ComputeSize()");
+        L($"int size = {fixedBytes};");
+        foreach (var m in typed)
+        {
+            L($"{{ int s = {Cache(m)}.RootFixedSize; if (s < 0) return -1; size += s; }}");
+        }
+        L("return size;");
+        Close();
+        L();
+        Open("private static bool ComputeRaw()");
+        L($"if (Size < 0 || !global::System.BitConverter.IsLittleEndian || {Un}.SizeOf<{t}>() != Size) return false;");
+        bool staticRaw = fixedMembers.All(m => m.Fixed!.IsRaw);
+        bool allFields = _m.Members.All(m => m.Symbol is IFieldSymbol);
+        if (!staticRaw || !allFields)
+        {
+            L("return false;");
+        }
+        else
+        {
+            foreach (var m in fixedMembers.Where(m => m.Fixed!.IsPackable))
+            {
+                L($"if (!{m.Fixed!.TypeName}.ApexIsRawLayout) return false;");
+            }
+            foreach (var m in typed)
+            {
+                L($"if (!{Cache(m)}.RootIsRawLayout) return false;");
+            }
+            // メモリ上の位置が、ワイヤ上の位置(固定長メンバー → 型引数メンバー)と一致すること
+            L($"var __probe = default({t});");
+            L($"ref byte __start = ref {Un}.As<{t}, byte>(ref __probe);");
+            offset = 0;
+            foreach (var m in fixedMembers)
+            {
+                L($"if ({Un}.ByteOffset(ref __start, ref {Un}.As<{m.TypeName}, byte>(ref {Un}.AsRef(in __probe.{Esc(m.Name)}))) != (nint){offset}) return false;");
+                offset += m.Fixed!.Size;
+            }
+            L($"int __o = {fixedBytes};");
+            foreach (var m in typed)
+            {
+                L($"if ({Un}.ByteOffset(ref __start, ref {Un}.As<{m.TypeName}, byte>(ref {Un}.AsRef(in __probe.{Esc(m.Name)}))) != (nint)__o) return false;");
+                L($"__o += {Cache(m)}.RootFixedSize;");
+            }
+            L("return true;");
+        }
+        Close();
+        Close();
+        L();
+    }
+
+    private sealed class RawRun
+    {
+        public int Id;
+        public int Start;
+        public List<MemberModel> Members = new();
+        public int Bytes;
+    }
+
+    private List<RawRun>? _rawRuns;
+
+    /// <summary>
+    /// 固定長領域のうち、メモリ表現がそのままワイヤ形式になるフィールド(スカラー)が 2 つ以上続く区間。
+    /// フィールドがメモリ上でも同じ順にすき間なく並ぶかは、実行時に型ごとに 1 回だけ調べる(__ApexRaw)。
+    /// </summary>
+    private List<RawRun> RawRuns()
+    {
+        if (_rawRuns is not null) return _rawRuns;
+        _rawRuns = new List<RawRun>();
+        var fixedList = FixedMembers.ToList();
+        for (int i = 0; i < fixedList.Count;)
+        {
+            if (!IsRawField(fixedList[i])) { i++; continue; }
+            int j = i;
+            var run = new RawRun { Id = _rawRuns.Count, Start = i };
+            while (j < fixedList.Count && IsRawField(fixedList[j]))
+            {
+                run.Members.Add(fixedList[j]);
+                run.Bytes += fixedList[j].Fixed!.Size;
+                j++;
+            }
+            if (run.Members.Count >= 2) _rawRuns.Add(run);
+            i = j;
+        }
+        return _rawRuns;
+
+        static bool IsRawField(MemberModel m) => m.Symbol is IFieldSymbol && m.Fixed is { IsRaw: true, IsPackable: false };
+    }
+
+    private void EmitRawRunChecks()
+    {
+        var runs = RawRuns();
+        if (runs.Count == 0) return;
+        string t = _m.SelfName;
+        L();
+        Open("private static class __ApexRaw");
+        foreach (var run in runs) L($"public static readonly bool R{run.Id} = Check{run.Id}();");
+        foreach (var run in runs)
+        {
+            L();
+            Open($"private static bool Check{run.Id}()");
+            L("if (!global::System.BitConverter.IsLittleEndian) return false;");
+            L(IsClass
+                ? $"var __probe = ({t})global::System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof({t}));"
+                : $"var __probe = default({t});");
+            var first = run.Members[0];
+            L($"ref byte __start = ref {Un}.As<{first.TypeName}, byte>(ref {Un}.AsRef(in __probe.{Esc(first.Name)}));");
+            int o = 0;
+            foreach (var m in run.Members)
+            {
+                L($"if ({Un}.ByteOffset(ref __start, ref {Un}.As<{m.TypeName}, byte>(ref {Un}.AsRef(in __probe.{Esc(m.Name)}))) != (nint){o}) return false;");
+                o += m.Fixed!.Size;
+            }
+            L("return true;");
+            Close();
+        }
         Close();
     }
 
@@ -649,7 +897,8 @@ internal sealed class CodeEmitter
         if (!_m.IsCompat) foreach (var c in _m.OnSerializing) L(c.IsStatic ? $"{c.Name}();" : $"value.{c.Name}();");
 
         if (_m.Members.Count > 0 || _m.HasMarkerBit) L("bool __le = TWriter.IsHostLittleEndian;");
-        foreach (var m in _m.Members)
+        // 固定長メンバーはローカルに取らずに直接書く(メンバーが多い型で、ローカルの退避と読み戻しを省く)
+        foreach (var m in _m.Members.Where(m => m.Encoding != MemberEncoding.Fixed))
         {
             L($"var {m.Local} = value.{Esc(m.Name)};");
         }
@@ -676,10 +925,33 @@ internal sealed class CodeEmitter
                 L($"{Un}.Add(ref __p, {b}) = (byte)(__mask{b / 8} >> {(b % 8) * 8});");
             }
             int offset = _m.MaskBytes;
-            foreach (var m in FixedMembers)
+            var runs = RawRuns();
+            var fixedList = FixedMembers.ToList();
+            for (int i = 0; i < fixedList.Count;)
             {
-                L(WriteFixedValue(m.Fixed!, $"ref {Un}.Add(ref __p, {offset})", m.Local, "__le"));
-                offset += m.Fixed!.Size;
+                var run = runs.FirstOrDefault(r => r.Start == i);
+                if (run is not null)
+                {
+                    var first = run.Members[0];
+                    Open($"if (__le && __ApexRaw.R{run.Id})");
+                    L($"{Un}.CopyBlockUnaligned(ref {Un}.Add(ref __p, {offset}), ref {Un}.As<{first.TypeName}, byte>(ref {Un}.AsRef(in value.{Esc(first.Name)})), {run.Bytes}u);");
+                    Close();
+                    Open("else");
+                    int o = offset;
+                    foreach (var m in run.Members)
+                    {
+                        L(WriteFixedValue(m.Fixed!, $"ref {Un}.Add(ref __p, {o})", $"value.{Esc(m.Name)}", "__le"));
+                        o += m.Fixed!.Size;
+                    }
+                    Close();
+                    offset += run.Bytes;
+                    i += run.Members.Count;
+                    continue;
+                }
+                var member = fixedList[i];
+                L(WriteFixedValue(member.Fixed!, $"ref {Un}.Add(ref __p, {offset})", $"value.{Esc(member.Name)}", "__le"));
+                offset += member.Fixed!.Size;
+                i++;
             }
             if (NullableFixedMembers.Any())
             {
@@ -765,10 +1037,44 @@ internal sealed class CodeEmitter
                 L($"ulong __mask{w} = {string.Join(" | ", parts)};");
             }
             int offset = _m.MaskBytes;
-            foreach (var m in FixedMembers)
+            if (_m.CreateEarly)
             {
-                L($"var {m.Local} = {ReadFixedValue(m.Fixed!, $"in {Un}.Add(ref {Un}.AsRef(in __p), {offset})", "__le")};");
-                offset += m.Fixed!.Size;
+                var runs = RawRuns();
+                var fixedList = FixedMembers.ToList();
+                for (int i = 0; i < fixedList.Count;)
+                {
+                    var run = runs.FirstOrDefault(r => r.Start == i);
+                    if (run is not null)
+                    {
+                        var first = run.Members[0];
+                        Open($"if (__le && __ApexRaw.R{run.Id})");
+                        L($"{Un}.CopyBlockUnaligned(ref {Un}.As<{first.TypeName}, byte>(ref __instance.{Esc(first.Name)}), ref {Un}.Add(ref {Un}.AsRef(in __p), {offset}), {run.Bytes}u);");
+                        Close();
+                        Open("else");
+                        int o = offset;
+                        foreach (var m in run.Members)
+                        {
+                            L($"__instance.{Esc(m.Name)} = {ReadFixedValue(m.Fixed!, $"in {Un}.Add(ref {Un}.AsRef(in __p), {o})", "__le")};");
+                            o += m.Fixed!.Size;
+                        }
+                        Close();
+                        offset += run.Bytes;
+                        i += run.Members.Count;
+                        continue;
+                    }
+                    var member = fixedList[i];
+                    L($"__instance.{Esc(member.Name)} = {ReadFixedValue(member.Fixed!, $"in {Un}.Add(ref {Un}.AsRef(in __p), {offset})", "__le")};");
+                    offset += member.Fixed!.Size;
+                    i++;
+                }
+            }
+            else
+            {
+                foreach (var m in FixedMembers)
+                {
+                    L($"var {m.Local} = {ReadFixedValue(m.Fixed!, $"in {Un}.Add(ref {Un}.AsRef(in __p), {offset})", "__le")};");
+                    offset += m.Fixed!.Size;
+                }
             }
         }
 
@@ -813,7 +1119,8 @@ internal sealed class CodeEmitter
 
         if (_m.CreateEarly)
         {
-            foreach (var m in _m.Members) L($"__instance.{Esc(m.Name)} = {m.Local};");
+            // 固定長メンバーは上で直接読んだ
+            foreach (var m in _m.Members.Where(m => m.Encoding != MemberEncoding.Fixed)) L($"__instance.{Esc(m.Name)} = {m.Local};");
         }
         else
         {

@@ -51,13 +51,13 @@ public readonly struct NullReferenceTracker : IReferenceTracker
 
 /// <summary>
 /// 参照追跡(オプトイン)。2 のべき乗サイズの同一性ハッシュ表を使う。
-/// 借りた配列は返却前に必ずクリアし、利用者オブジェクトへの参照を共有プールに残さない(アンロード可能性の不変条件)。
+/// 作業配列はスレッドごとに使い回し、返す前に使った範囲を消す(利用者オブジェクトへの参照を残さない。アンロード可能性の不変条件)。
 /// </summary>
 public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 {
     public static bool IsTrackingEnabled => true;
 
-    private struct Entry
+    internal struct Entry
     {
         public int HashCode;
         public int Next;
@@ -71,17 +71,20 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
     private int _count;
     private uint _nextId;
     private object?[]? _idToObject;
+    private uint _idLimit; // _idToObject に書いた最大 ID + 1(後始末で消す範囲)
+
+    // 書き込みでは「オブジェクト → ID」(ハッシュ表)だけ、読み取りでは「ID → オブジェクト」だけを使う。
+    // 書き込みは必ず TryGetReferenceId を先に呼ぶので、それで書き込み側と分かる。使わない側の表は作らない。
+    private bool _writing;
 
     public ActiveReferenceTracker()
     {
-        const int initialCapacity = 32;
-        _buckets = ArrayPool<int>.Shared.Rent(initialCapacity);
-        Array.Fill(_buckets, -1, 0, initialCapacity);
-        _entries = ArrayPool<Entry>.Shared.Rent(initialCapacity);
-        _idToObject = ArrayPool<object?>.Shared.Rent(initialCapacity);
-        _bucketMask = initialCapacity - 1;
+        // スレッドごとに使い回す小さな配列を借りる(共有プールの貸し借りと全体の消去を省く)
+        TrackerArrays.Rent(out _buckets, out _entries, out _idToObject);
+        _bucketMask = _buckets.Length - 1;
         _count = 0;
         _nextId = 0;
+        _idLimit = 0;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -89,12 +92,12 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     public bool TryGetReferenceId(object obj, out uint id)
     {
+        _writing = true;
         if (_buckets == null || _entries == null)
         {
             id = 0;
             return false;
         }
-
         int hashCode = RuntimeHelpers.GetHashCode(obj);
         for (int i = _buckets[hashCode & _bucketMask]; i >= 0; i = _entries[i].Next)
         {
@@ -104,7 +107,6 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
                 return true;
             }
         }
-
         id = 0;
         return false;
     }
@@ -113,14 +115,19 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
     {
         if (_buckets == null || _entries == null)
         {
+            bool writing = _writing;
             this = new ActiveReferenceTracker();
+            _writing = writing;
         }
-
+        if (!_writing)
+        {
+            RegisterForRead(obj, id);
+            return;
+        }
         if (_count >= _entries!.Length || _count > _bucketMask)
         {
             Resize();
         }
-
         int hashCode = RuntimeHelpers.GetHashCode(obj);
         int bucket = hashCode & _bucketMask;
         _entries[_count].HashCode = hashCode;
@@ -129,15 +136,19 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
         _entries[_count].Id = id;
         _buckets[bucket] = _count;
         _count++;
+    }
 
+    private void RegisterForRead(object obj, uint id)
+    {
         if (id >= _idToObject!.Length)
         {
-            var newIdMap = ArrayPool<object?>.Shared.Rent((int)Math.Max((long)id * 2, 64));
+            var newIdMap = new object?[(int)Math.Max((long)id * 2, 64)];
             Array.Copy(_idToObject, newIdMap, _idToObject.Length);
-            ArrayPool<object?>.Shared.Return(_idToObject, clearArray: true);
+            Array.Clear(_idToObject);
             _idToObject = newIdMap;
         }
         _idToObject[id] = obj;
+        if (id >= _idLimit) _idLimit = id + 1;
     }
 
     public bool TryGetObject(uint id, out object? obj)
@@ -154,12 +165,10 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
     private void Resize()
     {
         int newCapacity = (int)BitOperations.RoundUpToPowerOf2((uint)(_count * 2));
-        var newBuckets = ArrayPool<int>.Shared.Rent(newCapacity);
-        Array.Fill(newBuckets, -1, 0, newCapacity);
-
-        var newEntries = ArrayPool<Entry>.Shared.Rent(newCapacity);
+        var newBuckets = new int[newCapacity];
+        Array.Fill(newBuckets, -1);
+        var newEntries = new Entry[newCapacity];
         Array.Copy(_entries!, newEntries, _count);
-
         int newMask = newCapacity - 1;
         for (int i = 0; i < _count; i++)
         {
@@ -167,10 +176,8 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
             newEntries[i].Next = newBuckets[bucket];
             newBuckets[bucket] = i;
         }
-
-        ArrayPool<int>.Shared.Return(_buckets!);
-        ArrayPool<Entry>.Shared.Return(_entries!, clearArray: true);
-
+        // 古い配列は利用者のオブジェクトを残さないよう消してから手放す
+        Array.Clear(_entries!, 0, _count);
         _buckets = newBuckets;
         _entries = newEntries;
         _bucketMask = newMask;
@@ -178,21 +185,56 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     public void Dispose()
     {
-        if (_buckets != null)
+        if (_buckets is null || _entries is null || _idToObject is null) return;
+        // 使った範囲だけ消して返す(利用者のオブジェクトへの参照を残さない。アンロード可能性の不変条件)
+        Array.Clear(_entries, 0, _count);
+        Array.Fill(_buckets, -1);
+        Array.Clear(_idToObject, 0, (int)Math.Min(_idLimit, (uint)_idToObject.Length));
+        TrackerArrays.Return(_buckets, _entries, _idToObject);
+        _buckets = null;
+        _entries = null;
+        _idToObject = null;
+    }
+}
+
+/// <summary>
+/// 参照追跡の作業配列をスレッドごとに 1 組だけ使い回す。返すときは中身を消してあるので、利用者のオブジェクトは残らない。
+/// 大きくなった配列は使い回さない(メモリを抱え込まないため)。
+/// </summary>
+internal static class TrackerArrays
+{
+    private const int InitialCapacity = 32;
+    private const int MaxPooledCapacity = 4096;
+
+    [ThreadStatic] private static int[]? t_buckets;
+    [ThreadStatic] private static ActiveReferenceTracker.Entry[]? t_entries;
+    [ThreadStatic] private static object?[]? t_ids;
+
+    public static void Rent(out int[] buckets, out ActiveReferenceTracker.Entry[] entries, out object?[] ids)
+    {
+        buckets = t_buckets ?? NewBuckets();
+        entries = t_entries ?? new ActiveReferenceTracker.Entry[InitialCapacity];
+        ids = t_ids ?? new object?[InitialCapacity];
+        t_buckets = null;
+        t_entries = null;
+        t_ids = null;
+    }
+
+    public static void Return(int[] buckets, ActiveReferenceTracker.Entry[] entries, object?[] ids)
+    {
+        if (buckets.Length <= MaxPooledCapacity && entries.Length <= MaxPooledCapacity && ids.Length <= MaxPooledCapacity)
         {
-            ArrayPool<int>.Shared.Return(_buckets);
-            _buckets = null;
+            t_buckets = buckets;
+            t_entries = entries;
+            t_ids = ids;
         }
-        if (_entries != null)
-        {
-            ArrayPool<Entry>.Shared.Return(_entries, clearArray: true);
-            _entries = null;
-        }
-        if (_idToObject != null)
-        {
-            ArrayPool<object?>.Shared.Return(_idToObject, clearArray: true);
-            _idToObject = null;
-        }
+    }
+
+    private static int[] NewBuckets()
+    {
+        var buckets = new int[InitialCapacity];
+        Array.Fill(buckets, -1);
+        return buckets;
     }
 }
 

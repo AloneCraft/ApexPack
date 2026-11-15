@@ -52,6 +52,12 @@ public interface ISerializePackable<T> where T : ISerializePackable<T>
     /// <summary>本体の最小バイト数(件数ヘッダーの妥当性検査に使う)。</summary>
     static virtual int ApexMinBodySize => 0;
 
+    /// <summary>
+    /// 追跡なしの <see cref="SerializeWithTracker"/> が書くバイト数が値によらず決まる(または安く分かる)ならその値、そうでなければ -1。
+    /// ルートの直列化は、分かれば正確な大きさの配列へ直接書く。
+    /// </summary>
+    static virtual int ApexExactSize(scoped in T value) => -1;
+
     /// <summary>true ならルート API が自動で参照追跡を有効にする。</summary>
     static virtual bool ApexPreserveReferences => false;
 

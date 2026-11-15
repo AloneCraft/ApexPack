@@ -121,12 +121,12 @@ SPECS = [
     ("ImmutableArrayFormatter", E, EC, "ImmutableArray<T>", "ImmutableArray&lt;T&gt;(default は null)",
      ["if (value.IsDefault) { writer.WriteNullCollectionHeader(); return; }", span_w("value.AsSpan()")],
      arr_r("ImmutableCollectionsMarshal.AsImmutableArray(array)", "default")),
-    ("ImmutableListFormatter", E, EC, "ImmutableList<T>?", "ImmutableList&lt;T&gt;", COLL_W, arr_r("ImmutableList.Create<T>(array)")),
+    ("ImmutableListFormatter", E, EC, "ImmutableList<T>?", "ImmutableList&lt;T&gt;", foreach_w("value", "value.Count"), arr_r("ImmutableList.Create<T>(array)")),
     ("ImmutableQueueFormatter", E, EC, "ImmutableQueue<T>?", "ImmutableQueue&lt;T&gt;", [ENUM_W], arr_r("ImmutableQueue.Create<T>(array)")),
     ("ImmutableStackFormatter", E, EC, "ImmutableStack<T>?", "ImmutableStack&lt;T&gt;(先頭から順に書き、逆順に積み直す)", [ENUM_W],
      [f"var array = {READ_ARR};", "if (array is null) return null;", "Array.Reverse(array);", "return ImmutableStack.Create<T>(array);"]),
-    ("ImmutableHashSetFormatter", E, EC, "ImmutableHashSet<T>?", "ImmutableHashSet&lt;T&gt;", COLL_W, arr_r("ImmutableHashSet.Create<T>(array)")),
-    ("ImmutableSortedSetFormatter", E, EC, "ImmutableSortedSet<T>?", "ImmutableSortedSet&lt;T&gt;", COLL_W, arr_r("ImmutableSortedSet.Create<T>(array)")),
+    ("ImmutableHashSetFormatter", E, EC, "ImmutableHashSet<T>?", "ImmutableHashSet&lt;T&gt;", foreach_w("value", "value.Count"), arr_r("ImmutableHashSet.Create<T>(array)")),
+    ("ImmutableSortedSetFormatter", E, EC, "ImmutableSortedSet<T>?", "ImmutableSortedSet&lt;T&gt;", foreach_w("value", "value.Count"), arr_r("ImmutableSortedSet.Create<T>(array)")),
     ("ImmutableListInterfaceFormatter", E, EC, "IImmutableList<T>?", "IImmutableList&lt;T&gt;", [ENUM_W], arr_r("ImmutableList.Create<T>(array)")),
     ("ImmutableQueueInterfaceFormatter", E, EC, "IImmutableQueue<T>?", "IImmutableQueue&lt;T&gt;", [ENUM_W], arr_r("ImmutableQueue.Create<T>(array)")),
     ("ImmutableStackInterfaceFormatter", E, EC, "IImmutableStack<T>?", "IImmutableStack&lt;T&gt;", [ENUM_W],
@@ -161,6 +161,12 @@ SPECS = [
 ]
 
 
+EXACT = {
+    "ArrayFormatter": "value is null ? 1 : TF.FixedSize >= 0 ? ApexWire.CompactSize((uint)value.Length + 1) + value.Length * TF.FixedSize : -1",
+    "ListFormatter": "value is null ? 1 : TF.FixedSize >= 0 ? ApexWire.CompactSize((uint)value.Count + 1) + value.Count * TF.FixedSize : -1",
+}
+
+
 def emit(spec, out):
     name, gparams, cons, target, doc, write, read = spec
     out.append(f"/// <summary>{doc}。</summary>")
@@ -181,6 +187,15 @@ def emit(spec, out):
     for line in read:
         out.append("        " + line)
     out.append("    }")
+    if name == "ArrayFormatter":
+        out.append("")
+        out.append("    /// <summary>要素のメモリ表現(LE)がワイヤ形式と一致するなら要素のバイト数。</summary>")
+        out.append("    public static int RawElementSize => TF.FixedSize > 0 && TF.IsRawLayout ? TF.FixedSize : -1;")
+    if name in EXACT:
+        out.append("")
+        out.append("    /// <summary>要素が固定長なら、件数ヘッダー + 件数 × 固定長。</summary>")
+        out.append(f"    public static int ExactSize(scoped in {target} value)")
+        out.append(f"        => {EXACT[name]};")
     out.append("}")
     out.append("")
 

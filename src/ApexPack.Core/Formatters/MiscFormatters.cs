@@ -385,14 +385,111 @@ public readonly struct LookupFormatter<TKey, TValue, FK, FV> : IApexFormatter<IL
     {
         int count = reader.ReadCollectionHeader(ref guard, FK.MinWireSize + 1);
         if (count < 0) return null;
-        var pairs = new List<KeyValuePair<TKey, TValue>>();
+        // キーごとの要素列をそのまま束にする(要素ごとのハッシュと中間のリストを作らない)
+        var lookup = new ApexLookup<TKey, TValue>(count);
         for (int i = 0; i < count; i++)
         {
             TKey key = FK.Read(ref reader, ref tracker, ref guard);
             var elements = ApexSequence.ReadArray<TReader, TTracker, TGuard, TValue, FV>(ref reader, ref tracker, ref guard) ?? Array.Empty<TValue>();
-            foreach (var element in elements) pairs.Add(new KeyValuePair<TKey, TValue>(key, element));
+            lookup.Add(key, elements);
         }
-        return pairs.ToLookup(static p => p.Key, static p => p.Value);
+        return lookup;
+    }
+}
+
+/// <summary>
+/// 逆直列化で作る ILookup。グループは書いた順に並び、キーの検索は辞書で行う(null キーも扱う)。
+/// 同じキーが 2 回現れた場合は要素を後ろに足す(Enumerable.ToLookup と同じ結果)。
+/// </summary>
+internal sealed class ApexLookup<TKey, TValue> : ILookup<TKey, TValue>
+{
+    private readonly List<Grouping> _groups;
+    private readonly Dictionary<TKey, Grouping> _map;
+    private Grouping? _nullGroup;
+
+    public ApexLookup(int capacity)
+    {
+        _groups = new List<Grouping>(capacity);
+        _map = new Dictionary<TKey, Grouping>(capacity);
+    }
+
+    public void Add(TKey key, TValue[] elements)
+    {
+        Grouping? existing = key is null ? _nullGroup : _map.GetValueOrDefault(key);
+        if (existing is not null)
+        {
+            existing.Append(elements);
+            return;
+        }
+        var group = new Grouping(key, elements);
+        if (key is null) _nullGroup = group;
+        else _map.Add(key, group);
+        _groups.Add(group);
+    }
+
+    public int Count => _groups.Count;
+
+    public IEnumerable<TValue> this[TKey key]
+        => (key is null ? _nullGroup : _map.GetValueOrDefault(key)) ?? (IEnumerable<TValue>)Array.Empty<TValue>();
+
+    public bool Contains(TKey key) => key is null ? _nullGroup is not null : _map.ContainsKey(key);
+
+    public IEnumerator<IGrouping<TKey, TValue>> GetEnumerator()
+    {
+        foreach (var group in _groups) yield return group;
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+    private sealed class Grouping : IGrouping<TKey, TValue>, IList<TValue>, IReadOnlyList<TValue>
+    {
+        private TValue[] _elements;
+
+        public Grouping(TKey key, TValue[] elements)
+        {
+            Key = key;
+            _elements = elements;
+        }
+
+        public TKey Key { get; }
+
+        public void Append(TValue[] more)
+        {
+            var merged = new TValue[_elements.Length + more.Length];
+            _elements.CopyTo(merged, 0);
+            more.CopyTo(merged, _elements.Length);
+            _elements = merged;
+        }
+
+        public int Count => _elements.Length;
+
+        public bool IsReadOnly => true;
+
+        public TValue this[int index]
+        {
+            get => _elements[index];
+            set => throw new NotSupportedException();
+        }
+
+        public int IndexOf(TValue item) => Array.IndexOf(_elements, item);
+
+        public bool Contains(TValue item) => Array.IndexOf(_elements, item) >= 0;
+
+        public void CopyTo(TValue[] array, int arrayIndex) => _elements.CopyTo(array, arrayIndex);
+
+        public IEnumerator<TValue> GetEnumerator() => ((IEnumerable<TValue>)_elements).GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => _elements.GetEnumerator();
+
+        public void Add(TValue item) => throw new NotSupportedException();
+
+        public void Clear() => throw new NotSupportedException();
+
+        public void Insert(int index, TValue item) => throw new NotSupportedException();
+
+        public bool Remove(TValue item) => throw new NotSupportedException();
+
+        public void RemoveAt(int index) => throw new NotSupportedException();
     }
 }
 
@@ -528,8 +625,7 @@ public readonly struct StringBuilderFormatter : IApexFormatter<StringBuilder?>
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
-        string? s = ApexStringCodec.Read(ref reader);
-        return s is null ? null : new StringBuilder(s);
+        return ApexStringCodec.ReadStringBuilder(ref reader);
     }
 }
 
@@ -541,7 +637,7 @@ public readonly struct TypeFormatter : IApexFormatter<Type?>
     public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in Type? value, ref TTracker tracker)
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
-        => ApexStringCodec.Write(ref writer, value?.AssemblyQualifiedName);
+        => ApexStringCodec.Write(ref writer, value is null ? null : ShortNames.GetValue(value, static t => Shorten(t.AssemblyQualifiedName)));
 
     public static Type? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
         where TReader : struct, IApexBufferReader, allows ref struct
@@ -553,6 +649,35 @@ public readonly struct TypeFormatter : IApexFormatter<Type?>
         var type = guard.ResolveType(name);
         if (type is null) ApexThrowHelper.ThrowTypeNotResolved(name);
         return type;
+    }
+
+    /// <summary>
+    /// 書き込む型名(アセンブリ名から Version / Culture / PublicKeyToken を除いたもの)。
+    /// 型を強く握らない表(<see cref="System.Runtime.CompilerServices.ConditionalWeakTable{TKey, TValue}"/>)に置く。
+    /// </summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Type, string?> ShortNames = new();
+
+    /// <summary>
+    /// "NS.T`1[[NS.A, AsmA, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null]], AsmB, Version=..." から
+    /// 各アセンブリ名の ", Version=" 以降(次の ']' か末尾まで)を除く。読み取りは短い名前でも元の名前でも解決できる。
+    /// </summary>
+    internal static string? Shorten(string? name)
+    {
+        if (name is null) return null;
+        const string marker = ", Version=";
+        int index = name.IndexOf(marker, StringComparison.Ordinal);
+        if (index < 0) return name;
+        var builder = new StringBuilder(name.Length);
+        int position = 0;
+        while (index >= 0)
+        {
+            builder.Append(name, position, index - position);
+            int end = name.IndexOf(']', index);
+            position = end < 0 ? name.Length : end;
+            index = name.IndexOf(marker, position, StringComparison.Ordinal);
+        }
+        builder.Append(name, position, name.Length - position);
+        return builder.ToString();
     }
 }
 

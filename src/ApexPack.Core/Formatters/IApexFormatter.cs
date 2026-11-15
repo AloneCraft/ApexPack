@@ -31,6 +31,18 @@ public interface IApexFormatter<T>
     /// <summary>1 要素の最小バイト数(件数ヘッダー検査用)。</summary>
     static virtual int MinWireSize => 1;
 
+    /// <summary>
+    /// <see cref="Write"/> が書くバイト数が安く(走査なしで)分かるならその値、分からなければ -1。
+    /// ルートの直列化は、分かれば正確な大きさの配列へ直接書く(作業バッファからの写しを省く)。
+    /// </summary>
+    static virtual int ExactSize(scoped in T value) => -1;
+
+    /// <summary>
+    /// 1 次元配列のフォーマッタで、要素のメモリ表現(LE)がそのままワイヤ形式になるなら要素のバイト数、そうでなければ -1。
+    /// ルートの直列化は、件数ヘッダー + 要素の一括コピーで書く。
+    /// </summary>
+    static virtual int RawElementSize => -1;
+
     static virtual void WriteFixed(ref byte destination, scoped in T value, bool littleEndian)
         => throw new NotSupportedException();
 
@@ -53,6 +65,29 @@ public abstract class ApexFormatter<T>
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct;
 
+    // ---- よく使う writer / reader の組み合わせ(追跡なし・信頼済み入力)の入口 ----
+    // ジェネリックな仮想メソッド(Write / Read)は呼び出しのたびに実行時の検索が要るので、
+    // 実行時に解決するフォーマッタ(CachedFormatter)からはこちらを呼ぶ。FormatterAdapter は具象のフォーマッタを直接呼ぶ。
+
+    public virtual void WriteTo(ref ApexBufferWriter writer, scoped in T value)
+    {
+        var tracker = new NullReferenceTracker();
+        Write(ref writer, in value, ref tracker);
+    }
+
+    public virtual void WriteTo(ref ApexSpanWriter writer, scoped in T value)
+    {
+        var tracker = new NullReferenceTracker();
+        Write(ref writer, in value, ref tracker);
+    }
+
+    public virtual T ReadFrom(ref ApexSpanReader reader)
+    {
+        var tracker = new NullReferenceTracker();
+        var guard = new TrustedSecurityGuard();
+        return Read(ref reader, ref tracker, ref guard);
+    }
+
     /// <summary>ルートで自動的に参照追跡を有効にするなら true。</summary>
     public virtual bool PreserveReferences => false;
 
@@ -64,6 +99,12 @@ public abstract class ApexFormatter<T>
 
     /// <summary>固定長型を読む(<see cref="RootFixedSize"/> が 0 以上のときだけ呼ばれる)。</summary>
     public virtual T ReadFixedRoot(ref readonly byte source, bool littleEndian) => throw new NotSupportedException();
+
+    /// <summary>1 次元配列で、要素をメモリからそのまま書けるなら要素のバイト数、そうでなければ -1(ルートの高速経路用)。</summary>
+    public virtual int RootRawArrayElementSize => -1;
+
+    /// <summary>固定長型を書く(<see cref="RootFixedSize"/> が 0 以上のときだけ呼ばれる)。</summary>
+    public virtual void WriteFixedRoot(ref byte destination, scoped in T value, bool littleEndian) => throw new NotSupportedException();
 
     // ---- ルート API(非ジェネリックな仮想メソッド。static readonly 経由で呼ばれ、JIT が脱仮想化できる)----
 
@@ -220,11 +261,35 @@ public sealed class FormatterAdapter<T, TFormatter> : ApexFormatter<T>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public override T ReadFixedRoot(ref readonly byte source, bool littleEndian) => TFormatter.ReadFixed(in source, littleEndian);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public override void WriteFixedRoot(ref byte destination, scoped in T value, bool littleEndian) => TFormatter.WriteFixed(ref destination, in value, littleEndian);
+
+    public override int RootRawArrayElementSize => !_preserveReferences && BitConverter.IsLittleEndian ? TFormatter.RawElementSize : -1;
+
     public override void Write<TWriter, TTracker>(ref TWriter writer, scoped in T value, ref TTracker tracker)
         => TFormatter.Write(ref writer, in value, ref tracker);
 
     public override T Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
         => TFormatter.Read(ref reader, ref tracker, ref guard);
+
+    public override void WriteTo(ref ApexBufferWriter writer, scoped in T value)
+    {
+        var tracker = new NullReferenceTracker();
+        TFormatter.Write(ref writer, in value, ref tracker);
+    }
+
+    public override void WriteTo(ref ApexSpanWriter writer, scoped in T value)
+    {
+        var tracker = new NullReferenceTracker();
+        TFormatter.Write(ref writer, in value, ref tracker);
+    }
+
+    public override T ReadFrom(ref ApexSpanReader reader)
+    {
+        var tracker = new NullReferenceTracker();
+        var guard = new TrustedSecurityGuard();
+        return TFormatter.Read(ref reader, ref tracker, ref guard);
+    }
 
     public override byte[] SerializeToArray(scoped in T value)
     {
@@ -238,6 +303,17 @@ public sealed class FormatterAdapter<T, TFormatter> : ApexFormatter<T>
             {
                 TFormatter.WriteFixed(ref result[0], in value, BitConverter.IsLittleEndian);
             }
+            return result;
+        }
+
+        // 書くバイト数が分かる(固定長要素の配列など)なら、正確な大きさの配列へ直接書く
+        int exact = TFormatter.ExactSize(in value);
+        if (exact >= 0)
+        {
+            var result = GC.AllocateUninitializedArray<byte>(exact);
+            var direct = new ApexSpanWriter(result);
+            var directTracker = new NullReferenceTracker();
+            TFormatter.Write(ref direct, in value, ref directTracker);
             return result;
         }
 
@@ -339,6 +415,7 @@ internal static class ApexRootInfo<T>
 {
     public static readonly int FixedSize = ApexFormatterCache<T>.Instance.RootFixedSize;
     public static readonly bool IsRawLayout = ApexFormatterCache<T>.Instance.RootIsRawLayout;
+    public static readonly int RawArrayElementSize = ApexFormatterCache<T>.Instance.RootRawArrayElementSize;
 }
 
 /// <summary>
@@ -346,20 +423,84 @@ internal static class ApexRootInfo<T>
 /// </summary>
 public readonly struct CachedFormatter<T> : IApexFormatter<T>
 {
+    // 実行時に解決したフォーマッタが固定長なら、固定長として扱う(型ごとの static readonly なので Tier1 では定数になる)。
+    // ジェネリック型の T のメンバーで、T が int などのときに一括コピーや仮想呼び出しなしの経路を使える。
+    // 固定長の型は Write が書く内容と固定長表現が同じなので、形式は変わらない。
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in T value, ref TTracker tracker)
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
-        => ApexFormatterCache<T>.Instance.Write(ref writer, in value, ref tracker);
+    {
+        int size = ApexRootInfo<T>.FixedSize;
+        if (size >= 0)
+        {
+            WriteFixed(ref writer.GetSpanRef(size), in value, TWriter.IsHostLittleEndian);
+            return;
+        }
+        // 追跡なしで、よく使う writer なら非ジェネリックな仮想メソッドを呼ぶ(型の比較は JIT 時に定数になる)
+        if (typeof(TTracker) == typeof(NullReferenceTracker))
+        {
+            if (typeof(TWriter) == typeof(ApexBufferWriter))
+            {
+                ApexFormatterCache<T>.Instance.WriteTo(ref Unsafe.As<TWriter, ApexBufferWriter>(ref writer), in value);
+                return;
+            }
+            if (typeof(TWriter) == typeof(ApexSpanWriter))
+            {
+                ApexFormatterCache<T>.Instance.WriteTo(ref Unsafe.As<TWriter, ApexSpanWriter>(ref writer), in value);
+                return;
+            }
+        }
+        ApexFormatterCache<T>.Instance.Write(ref writer, in value, ref tracker);
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static T Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
         where TReader : struct, IApexBufferReader, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
-        => ApexFormatterCache<T>.Instance.Read(ref reader, ref tracker, ref guard);
+    {
+        int size = ApexRootInfo<T>.FixedSize;
+        if (size >= 0) return ReadFixed(in reader.GetSpanRef(size), TReader.IsHostLittleEndian);
+        if (typeof(TReader) == typeof(ApexSpanReader) && typeof(TTracker) == typeof(NullReferenceTracker) && typeof(TGuard) == typeof(TrustedSecurityGuard))
+        {
+            return ApexFormatterCache<T>.Instance.ReadFrom(ref Unsafe.As<TReader, ApexSpanReader>(ref reader));
+        }
+        return ApexFormatterCache<T>.Instance.Read(ref reader, ref tracker, ref guard);
+    }
 
-    public static int MinWireSize => 0;
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => ApexRootInfo<T>.FixedSize;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => ApexRootInfo<T>.IsRawLayout;
+    }
+
+    public static int MinWireSize => ApexRootInfo<T>.FixedSize > 0 ? ApexRootInfo<T>.FixedSize : 0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in T value, bool littleEndian)
+    {
+        if (littleEndian && ApexRootInfo<T>.IsRawLayout)
+        {
+            Unsafe.WriteUnaligned(ref destination, value);
+            return;
+        }
+        ApexFormatterCache<T>.Instance.WriteFixedRoot(ref destination, in value, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && ApexRootInfo<T>.IsRawLayout) return Unsafe.ReadUnaligned<T>(in source);
+        return ApexFormatterCache<T>.Instance.ReadFixedRoot(in source, littleEndian);
+    }
 }
 
 /// <summary>

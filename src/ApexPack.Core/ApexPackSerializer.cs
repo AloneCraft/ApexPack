@@ -41,6 +41,17 @@ public static class ApexPackSerializer
             return result;
         }
 
+        // 書くバイト数が値によらず決まる型は、正確な大きさの配列へ直接書く
+        int exact = T.ApexExactSize(in value);
+        if (exact >= 0)
+        {
+            var result = GC.AllocateUninitializedArray<byte>(exact);
+            var direct = new ApexSpanWriter(result);
+            var tracker = new NullReferenceTracker();
+            T.SerializeWithTracker(ref direct, in value, ref tracker);
+            return result;
+        }
+
         return SerializeVariable(in value);
     }
 
@@ -63,7 +74,48 @@ public static class ApexPackSerializer
     }
 
     /// <summary>任意の型(コレクション、文字列、BCL 型など)を byte 配列にする。</summary>
-    public static byte[] Serialize<T>(T value) => ApexFormatterCache<T>.Instance.SerializeToArray(in value);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static byte[] Serialize<T>(T value)
+    {
+        // 固定長型は仮想呼び出しを通さずに書く(条件は型ごとの static readonly で、Tier1 では定数になる)
+        int fixedSize = ApexRootInfo<T>.FixedSize;
+        if (fixedSize >= 0)
+        {
+            var result = GC.AllocateUninitializedArray<byte>(fixedSize);
+            if (fixedSize > 0)
+            {
+                ref byte destination = ref MemoryMarshal.GetArrayDataReference(result);
+                if (ApexRootInfo<T>.IsRawLayout) Unsafe.WriteUnaligned(ref destination, value);
+                else ApexFormatterCache<T>.Instance.WriteFixedRoot(ref destination, in value, BitConverter.IsLittleEndian);
+            }
+            return result;
+        }
+        // 要素をメモリからそのまま書ける 1 次元配列(int[] など)は、件数ヘッダー + 一括コピーで直接書く
+        int elementSize = ApexRootInfo<T>.RawArrayElementSize;
+        if (elementSize > 0)
+        {
+            return SerializeRawArray(Unsafe.As<Array>((object?)value), elementSize);
+        }
+        return ApexFormatterCache<T>.Instance.SerializeToArray(in value);
+    }
+
+    /// <summary>ArrayFormatter と同じ形式(CompactUInt(件数 + 1) + 要素、null は 0)を一度に書く。</summary>
+    private static byte[] SerializeRawArray(Array? array, int elementSize)
+    {
+        if (array is null) return new byte[] { 0 };
+        int length = array.Length;
+        uint header = (uint)length + 1;
+        int headerSize = ApexWire.CompactSize(header);
+        int body = checked(length * elementSize);
+        var result = GC.AllocateUninitializedArray<byte>(checked(headerSize + body));
+        ref byte destination = ref MemoryMarshal.GetArrayDataReference(result);
+        ApexWire.WriteCompact(ref destination, header, le: true);
+        if (body > 0)
+        {
+            Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref destination, headerSize), ref MemoryMarshal.GetArrayDataReference(array), (uint)body);
+        }
+        return result;
+    }
 
     /// <summary>[ApexPackable] 型を <paramref name="destination"/> へ書き、書いたバイト数を返す(ヒープ割り当てなし)。</summary>
     [OverloadResolutionPriority(1)]

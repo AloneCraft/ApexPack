@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 using Xunit.Sdk;
@@ -53,13 +54,41 @@ public static class HarnessProgram
             .Where(c => filter is null || c.Id.Contains(filter, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
+        // 1. テストを実行し、呼び出しを記録して確認する(再現性・往復)
+        var measured = new List<(CallRecord Record, CallResult Result)>();
         int done = 0;
         foreach (var testCase in cases)
         {
-            run.Tests.Add(Execute(testCase, timing));
+            var (result, records) = Execute(testCase);
+            run.Tests.Add(result);
+            foreach (var record in records)
+            {
+                var call = record.Check();
+                result.Calls.Add(call);
+                measured.Add((record, call));
+            }
             done++;
             // 進捗(Runner が読む)
             Console.WriteLine($"progress {done}/{cases.Count} {testCase.Id}");
+        }
+
+        // 2. 全記録をまとめて暖機し、段階的コンパイルが最適化を終えるのを待ってから測る
+        if (timing)
+        {
+            for (int round = 0; round < 3; round++)
+            {
+                for (int i = 0; i < measured.Count; i++)
+                {
+                    measured[i].Record.Warm(calls: 60, milliseconds: 150);
+                    if (i % 50 == 0) Console.WriteLine($"progress {i}/{measured.Count} 暖機 {round + 1}/3");
+                }
+                WaitForJitIdle();
+            }
+            for (int i = 0; i < measured.Count; i++)
+            {
+                measured[i].Record.Measure(measured[i].Result);
+                Console.WriteLine($"progress {i + 1}/{measured.Count} 計測 {measured[i].Result.Type}");
+            }
         }
 
         var directory = Path.GetDirectoryName(Path.GetFullPath(output));
@@ -67,6 +96,24 @@ public static class HarnessProgram
         File.WriteAllText(output, JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"done {run.Tests.Count} tests -> {output}");
         return 0;
+    }
+
+    /// <summary>
+    /// 段階的コンパイルの最適化が落ち着くまで待つ(コンパイル済みメソッド数が 1 秒増えなくなるまで。最大 30 秒)。
+    /// 固定の待ち時間では、負荷の高い PC で最適化が終わる前に測ってしまうことがあった。
+    /// </summary>
+    private static void WaitForJitIdle()
+    {
+        var limit = Stopwatch.StartNew();
+        long last = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false);
+        int quiet = 0;
+        while (quiet < 4 && limit.Elapsed < TimeSpan.FromSeconds(30))
+        {
+            Thread.Sleep(250);
+            long now = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false);
+            quiet = now == last ? quiet + 1 : 0;
+            last = now;
+        }
     }
 
     private sealed record TestCase(string Id, Type Class, MethodInfo Method, object?[] Arguments, string? Skip);
@@ -128,14 +175,14 @@ public static class HarnessProgram
         _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? value.GetType().Name,
     };
 
-    private static TestResult Execute(TestCase testCase, bool timing)
+    private static (TestResult Result, List<CallRecord> Records) Execute(TestCase testCase)
     {
         var result = new TestResult { Id = testCase.Id, Class = testCase.Class.Name, Method = testCase.Method.Name };
         if (testCase.Skip is not null)
         {
             result.Status = "skip";
             result.SkipReason = testCase.Skip;
-            return result;
+            return (result, new List<CallRecord>());
         }
 
         Recorder.Begin();
@@ -167,11 +214,7 @@ public static class HarnessProgram
         }
 
         foreach (var record in records) record.Prepare();
-        foreach (var record in Deduplicate(records))
-        {
-            result.Calls.Add(record.Replay(timing));
-        }
-        return result;
+        return (result, Deduplicate(records).ToList());
     }
 
     private static void InvokeTest(TestCase testCase)

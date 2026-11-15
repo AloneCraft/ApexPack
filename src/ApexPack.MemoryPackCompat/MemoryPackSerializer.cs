@@ -24,7 +24,7 @@ public static class MemoryPackSerializer
         CheckOptions(options);
         try
         {
-            return ApexFormatterCache<T>.Instance.SerializeToArray(in value!);
+            return ApexPackSerializer.Serialize<T>(value!);
         }
         catch (Exception e) when (ShouldWrap(e))
         {

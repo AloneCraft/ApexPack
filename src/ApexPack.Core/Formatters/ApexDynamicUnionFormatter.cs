@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
+using System.Linq;
 using ApexPack.Buffers;
 
 namespace ApexPack;
@@ -44,9 +47,13 @@ public static class ApexDynamicUnion
 /// </remarks>
 public sealed class ApexDynamicUnionFormatter<T> : ApexFormatter<T> where T : class
 {
+    /// <summary>タグを配列で引く上限(これより大きいタグは辞書で引く)。</summary>
+    private const int DenseTagLimit = 1024;
+
     private readonly object _gate = new();
-    private Dictionary<Type, UnionCase> _byType = new();
-    private Dictionary<ushort, UnionCase> _byTag = new();
+
+    /// <summary>対応表。変更時は複製を作って差し替える(読み取り側はロックなし)。</summary>
+    private Table _table = Table.Empty;
 
     public ApexDynamicUnionFormatter(params (ushort Tag, Type Type)[] cases)
     {
@@ -59,15 +66,11 @@ public sealed class ApexDynamicUnionFormatter<T> : ApexFormatter<T> where T : cl
     {
         ArgumentNullException.ThrowIfNull(type);
         if (!typeof(T).IsAssignableFrom(type)) throw new ArgumentException($"{type} is not assignable to {typeof(T)}.");
-        var unionCase = (UnionCase)Activator.CreateInstance(typeof(UnionCase<>).MakeGenericType(typeof(T), type), tag)!;
+        var unionCase = (UnionCase)Activator.CreateInstance(typeof(UnionCase<>).MakeGenericType(typeof(T), type), tag, type)!;
         lock (_gate)
         {
-            if (_byTag.ContainsKey(tag)) throw new ArgumentException($"Union tag {tag} is already registered.");
-            // 読み取り中の辞書を変えないよう、書き換えた複製に差し替える
-            var byType = new Dictionary<Type, UnionCase>(_byType) { [type] = unionCase };
-            var byTag = new Dictionary<ushort, UnionCase>(_byTag) { [tag] = unionCase };
-            _byType = byType;
-            _byTag = byTag;
+            if (_table.FindTag(tag) is not null) throw new ArgumentException($"Union tag {tag} is already registered.");
+            _table = new Table(_table.Cases.Where(c => c.Type != type).Append(unionCase).ToArray());
         }
     }
 
@@ -76,13 +79,8 @@ public sealed class ApexDynamicUnionFormatter<T> : ApexFormatter<T> where T : cl
     {
         lock (_gate)
         {
-            if (!_byType.TryGetValue(type, out var unionCase)) return false;
-            var byType = new Dictionary<Type, UnionCase>(_byType);
-            byType.Remove(type);
-            var byTag = new Dictionary<ushort, UnionCase>(_byTag);
-            byTag.Remove(unionCase.Tag);
-            _byType = byType;
-            _byTag = byTag;
+            if (_table.FindType(type) is null) return false;
+            _table = new Table(_table.Cases.Where(c => c.Type != type).ToArray());
             return true;
         }
     }
@@ -94,32 +92,127 @@ public sealed class ApexDynamicUnionFormatter<T> : ApexFormatter<T> where T : cl
             writer.WriteByte(0);
             return;
         }
-        if (_byType.TryGetValue(value.GetType(), out var unionCase))
+        var unionCase = _table.FindType(value.GetType());
+        if (unionCase is null)
         {
-            writer.WriteCompactUInt((uint)unionCase.Tag + 1);
-            unionCase.Write(ref writer, value, ref tracker);
+            ApexThrowHelper.ThrowUnregisteredUnionType(value.GetType(), typeof(T));
             return;
         }
-        ApexThrowHelper.ThrowUnregisteredUnionType(value.GetType(), typeof(T));
+        writer.WriteCompactUInt((uint)unionCase.Tag + 1);
+        unionCase.Write(ref writer, value, ref tracker);
     }
 
     public override T Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
     {
         uint header = reader.ReadCompactUInt();
         if (header == 0) return null!;
-        if (header - 1 <= ushort.MaxValue && _byTag.TryGetValue((ushort)(header - 1), out var unionCase))
+        var unionCase = _table.FindTag(header - 1);
+        if (unionCase is null)
         {
-            return unionCase.Read(ref reader, ref tracker, ref guard);
+            ApexThrowHelper.ThrowInvalidUnionTag(header - 1, typeof(T));
+            return null!;
         }
-        ApexThrowHelper.ThrowInvalidUnionTag(header - 1, typeof(T));
-        return null!;
+        return unionCase.Read(ref reader, ref tracker, ref guard);
+    }
+
+    // ---- ルート: ジェネリックな仮想メソッド(呼び出しのたびに実行時の検索が要る)を通さず、具象型の非ジェネリックな入口を使う ----
+
+    public override byte[] SerializeToArray(scoped in T value)
+    {
+        if (value is null) return new byte[] { 0 };
+        var unionCase = _table.FindType(value.GetType());
+        if (unionCase is null)
+        {
+            ApexThrowHelper.ThrowUnregisteredUnionType(value.GetType(), typeof(T));
+            return null!;
+        }
+        byte[] body = unionCase.SerializeBody(value);
+        uint header = (uint)unionCase.Tag + 1;
+        int headerSize = ApexWire.CompactSize(header);
+        var result = GC.AllocateUninitializedArray<byte>(headerSize + body.Length);
+        ApexWire.WriteCompact(ref MemoryMarshal.GetArrayDataReference(result), header, BitConverter.IsLittleEndian);
+        body.CopyTo(result.AsSpan(headerSize));
+        return result;
+    }
+
+    public override T Deserialize(ReadOnlySpan<byte> source, out int consumed)
+    {
+        var reader = new ApexSpanReader(source);
+        uint header = reader.ReadCompactUInt();
+        int headerSize = reader.Consumed;
+        if (header == 0)
+        {
+            consumed = headerSize;
+            return null!;
+        }
+        var unionCase = _table.FindTag(header - 1);
+        if (unionCase is null)
+        {
+            ApexThrowHelper.ThrowInvalidUnionTag(header - 1, typeof(T));
+            consumed = 0;
+            return null!;
+        }
+        T value = unionCase.DeserializeBody(source.Slice(headerSize), out int bodySize);
+        consumed = headerSize + bodySize;
+        return value;
+    }
+
+    /// <summary>対応表(不変)。具象型は少数なので線形に探し、タグは小さければ配列で引く。</summary>
+    private sealed class Table
+    {
+        public static readonly Table Empty = new(Array.Empty<UnionCase>());
+
+        public readonly UnionCase[] Cases;
+        private readonly UnionCase?[] _dense;
+        private readonly Dictionary<uint, UnionCase>? _sparse;
+
+        public Table(UnionCase[] cases)
+        {
+            Cases = cases;
+            int max = cases.Length == 0 ? -1 : cases.Max(c => (int)c.Tag);
+            if (max < DenseTagLimit)
+            {
+                _dense = new UnionCase?[max + 1];
+                foreach (var c in cases) _dense[c.Tag] = c;
+            }
+            else
+            {
+                _dense = Array.Empty<UnionCase?>();
+                _sparse = cases.ToDictionary(c => (uint)c.Tag);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public UnionCase? FindType(Type type)
+        {
+            var cases = Cases;
+            for (int i = 0; i < cases.Length; i++)
+            {
+                if (ReferenceEquals(cases[i].Type, type)) return cases[i];
+            }
+            return null;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public UnionCase? FindTag(uint tag)
+        {
+            var dense = _dense;
+            if (tag < (uint)dense.Length) return dense[tag];
+            return _sparse is not null && _sparse.TryGetValue(tag, out var c) ? c : null;
+        }
     }
 
     private abstract class UnionCase
     {
-        protected UnionCase(ushort tag) => Tag = tag;
+        protected UnionCase(ushort tag, Type type)
+        {
+            Tag = tag;
+            Type = type;
+        }
 
         public ushort Tag { get; }
+
+        public Type Type { get; }
 
         public abstract void Write<TWriter, TTracker>(ref TWriter writer, T value, ref TTracker tracker)
             where TWriter : struct, IApexBufferWriter, allows ref struct
@@ -129,11 +222,17 @@ public sealed class ApexDynamicUnionFormatter<T> : ApexFormatter<T> where T : cl
             where TReader : struct, IApexBufferReader, allows ref struct
             where TTracker : IReferenceTracker, allows ref struct
             where TGuard : ISecurityGuard, allows ref struct;
+
+        /// <summary>本体だけを byte 配列にする(ルート用)。</summary>
+        public abstract byte[] SerializeBody(T value);
+
+        /// <summary>本体だけを読む(ルート用)。</summary>
+        public abstract T DeserializeBody(ReadOnlySpan<byte> source, out int consumed);
     }
 
     private sealed class UnionCase<TDerived> : UnionCase where TDerived : T
     {
-        public UnionCase(ushort tag) : base(tag) { }
+        public UnionCase(ushort tag, Type type) : base(tag, type) { }
 
         public override void Write<TWriter, TTracker>(ref TWriter writer, T value, ref TTracker tracker)
         {
@@ -143,5 +242,14 @@ public sealed class ApexDynamicUnionFormatter<T> : ApexFormatter<T> where T : cl
 
         public override T Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
             => ApexFormatterCache<TDerived>.Instance.Read(ref reader, ref tracker, ref guard);
+
+        public override byte[] SerializeBody(T value)
+        {
+            var derived = (TDerived)value;
+            return ApexFormatterCache<TDerived>.Instance.SerializeToArray(in derived);
+        }
+
+        public override T DeserializeBody(ReadOnlySpan<byte> source, out int consumed)
+            => ApexFormatterCache<TDerived>.Instance.Deserialize(source, out consumed);
     }
 }

@@ -162,6 +162,15 @@ internal sealed class TypeModel
     public string CollectionElement = "";
     public string CollectionElementFormatter = "";
 
+    /// <summary>Collection: List&lt;T&gt; の派生(要素を span で読み書きできる)。</summary>
+    public bool CollectionIsList;
+
+    /// <summary>Collection: 追加の呼び方。"direct"(公開の Add(T))、"keyvalue"(Add(key, value))、"interface"(ICollection&lt;T&gt;.Add)。</summary>
+    public string CollectionAdd = "interface";
+
+    /// <summary>Collection: 公開の EnsureCapacity(int) がある。</summary>
+    public bool CollectionEnsureCapacity;
+
     public bool PreserveReferences;
 
     /// <summary>
@@ -181,6 +190,12 @@ internal sealed class TypeModel
 
     /// <summary>基底型の生成コードにも ApexPreserveReferences がある(new を付ける)。</summary>
     public bool HidesBasePreserveReferences;
+
+    /// <summary>
+    /// ジェネリック構造体で、型引数のメンバーが実行時に固定長なら構造体全体も固定長になる(ConditionalFixed)。
+    /// 条件: マスクなし、メンバーは固定長か型引数だけ、コールバックなし。形式は Object と同じ(固定長メンバー → 型引数メンバーの順)。
+    /// </summary>
+    public bool ConditionalFixed;
 
     /// <summary>FixedStruct: 一括コピー可否の静的条件を満たすか。</summary>
     public bool FixedRawEligible;

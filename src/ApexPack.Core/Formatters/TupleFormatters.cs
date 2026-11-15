@@ -2,6 +2,7 @@
 #nullable enable
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using ApexPack.Buffers;
 
 namespace ApexPack;
@@ -15,6 +16,7 @@ public readonly struct ValueTupleFormatter<T1, F1> : IApexFormatter<ValueTuple<T
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
     }
@@ -25,11 +27,56 @@ public readonly struct ValueTupleFormatter<T1, F1> : IApexFormatter<ValueTuple<T
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         return new ValueTuple<T1>(v0);
     }
 
     public static int MinWireSize => F1.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 ? F1.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        return new ValueTuple<T1>(v0);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（1 要素）。</summary>
@@ -69,6 +116,7 @@ public readonly struct ValueTupleFormatter<T1, T2, F1, F2> : IApexFormatter<Valu
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
         T2 v1 = value.Item2;
@@ -81,12 +129,60 @@ public readonly struct ValueTupleFormatter<T1, T2, F1, F2> : IApexFormatter<Valu
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         T2 v1 = F2.Read(ref reader, ref tracker, ref guard);
         return new ValueTuple<T1, T2>(v0, v1);
     }
 
     public static int MinWireSize => F1.MinWireSize + F2.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 && F2.FixedSize >= 0 ? F1.FixedSize + F2.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1, T2> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+        F2.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize), value.Item2, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1, T2> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1, T2>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        T2 v1 = F2.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize), littleEndian);
+        return new ValueTuple<T1, T2>(v0, v1);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1, T2>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout && F2.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1, T2>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1, T2>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T2, byte>(ref probe.Item2)) != (nint)(F1.FixedSize)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（2 要素）。</summary>
@@ -131,6 +227,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, F1, F2, F3> : IApexFormat
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
         T2 v1 = value.Item2;
@@ -145,6 +242,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, F1, F2, F3> : IApexFormat
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         T2 v1 = F2.Read(ref reader, ref tracker, ref guard);
         T3 v2 = F3.Read(ref reader, ref tracker, ref guard);
@@ -152,6 +250,56 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, F1, F2, F3> : IApexFormat
     }
 
     public static int MinWireSize => F1.MinWireSize + F2.MinWireSize + F3.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 && F2.FixedSize >= 0 && F3.FixedSize >= 0 ? F1.FixedSize + F2.FixedSize + F3.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1, T2, T3> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+        F2.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize), value.Item2, littleEndian);
+        F3.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize), value.Item3, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1, T2, T3> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1, T2, T3>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        T2 v1 = F2.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize), littleEndian);
+        T3 v2 = F3.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize), littleEndian);
+        return new ValueTuple<T1, T2, T3>(v0, v1, v2);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1, T2, T3>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout && F2.IsRawLayout && F3.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1, T2, T3>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1, T2, T3>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T2, byte>(ref probe.Item2)) != (nint)(F1.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T3, byte>(ref probe.Item3)) != (nint)(F1.FixedSize + F2.FixedSize)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（3 要素）。</summary>
@@ -201,6 +349,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, F1, F2, F3, F4> : IAp
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
         T2 v1 = value.Item2;
@@ -217,6 +366,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, F1, F2, F3, F4> : IAp
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         T2 v1 = F2.Read(ref reader, ref tracker, ref guard);
         T3 v2 = F3.Read(ref reader, ref tracker, ref guard);
@@ -225,6 +375,59 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, F1, F2, F3, F4> : IAp
     }
 
     public static int MinWireSize => F1.MinWireSize + F2.MinWireSize + F3.MinWireSize + F4.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 && F2.FixedSize >= 0 && F3.FixedSize >= 0 && F4.FixedSize >= 0 ? F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1, T2, T3, T4> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+        F2.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize), value.Item2, littleEndian);
+        F3.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize), value.Item3, littleEndian);
+        F4.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize), value.Item4, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1, T2, T3, T4> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1, T2, T3, T4>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        T2 v1 = F2.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize), littleEndian);
+        T3 v2 = F3.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize), littleEndian);
+        T4 v3 = F4.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize), littleEndian);
+        return new ValueTuple<T1, T2, T3, T4>(v0, v1, v2, v3);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1, T2, T3, T4>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout && F2.IsRawLayout && F3.IsRawLayout && F4.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1, T2, T3, T4>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1, T2, T3, T4>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T2, byte>(ref probe.Item2)) != (nint)(F1.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T3, byte>(ref probe.Item3)) != (nint)(F1.FixedSize + F2.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T4, byte>(ref probe.Item4)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（4 要素）。</summary>
@@ -279,6 +482,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, F1, F2, F3, F4, F
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
         T2 v1 = value.Item2;
@@ -297,6 +501,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, F1, F2, F3, F4, F
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         T2 v1 = F2.Read(ref reader, ref tracker, ref guard);
         T3 v2 = F3.Read(ref reader, ref tracker, ref guard);
@@ -306,6 +511,62 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, F1, F2, F3, F4, F
     }
 
     public static int MinWireSize => F1.MinWireSize + F2.MinWireSize + F3.MinWireSize + F4.MinWireSize + F5.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 && F2.FixedSize >= 0 && F3.FixedSize >= 0 && F4.FixedSize >= 0 && F5.FixedSize >= 0 ? F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1, T2, T3, T4, T5> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+        F2.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize), value.Item2, littleEndian);
+        F3.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize), value.Item3, littleEndian);
+        F4.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize), value.Item4, littleEndian);
+        F5.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), value.Item5, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1, T2, T3, T4, T5> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1, T2, T3, T4, T5>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        T2 v1 = F2.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize), littleEndian);
+        T3 v2 = F3.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize), littleEndian);
+        T4 v3 = F4.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize), littleEndian);
+        T5 v4 = F5.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), littleEndian);
+        return new ValueTuple<T1, T2, T3, T4, T5>(v0, v1, v2, v3, v4);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1, T2, T3, T4, T5>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout && F2.IsRawLayout && F3.IsRawLayout && F4.IsRawLayout && F5.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1, T2, T3, T4, T5>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1, T2, T3, T4, T5>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T2, byte>(ref probe.Item2)) != (nint)(F1.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T3, byte>(ref probe.Item3)) != (nint)(F1.FixedSize + F2.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T4, byte>(ref probe.Item4)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T5, byte>(ref probe.Item5)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（5 要素）。</summary>
@@ -365,6 +626,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, F1, F2, F3, F
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
         T2 v1 = value.Item2;
@@ -385,6 +647,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, F1, F2, F3, F
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         T2 v1 = F2.Read(ref reader, ref tracker, ref guard);
         T3 v2 = F3.Read(ref reader, ref tracker, ref guard);
@@ -395,6 +658,65 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, F1, F2, F3, F
     }
 
     public static int MinWireSize => F1.MinWireSize + F2.MinWireSize + F3.MinWireSize + F4.MinWireSize + F5.MinWireSize + F6.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 && F2.FixedSize >= 0 && F3.FixedSize >= 0 && F4.FixedSize >= 0 && F5.FixedSize >= 0 && F6.FixedSize >= 0 ? F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1, T2, T3, T4, T5, T6> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+        F2.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize), value.Item2, littleEndian);
+        F3.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize), value.Item3, littleEndian);
+        F4.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize), value.Item4, littleEndian);
+        F5.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), value.Item5, littleEndian);
+        F6.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize), value.Item6, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1, T2, T3, T4, T5, T6> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1, T2, T3, T4, T5, T6>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        T2 v1 = F2.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize), littleEndian);
+        T3 v2 = F3.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize), littleEndian);
+        T4 v3 = F4.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize), littleEndian);
+        T5 v4 = F5.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), littleEndian);
+        T6 v5 = F6.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize), littleEndian);
+        return new ValueTuple<T1, T2, T3, T4, T5, T6>(v0, v1, v2, v3, v4, v5);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1, T2, T3, T4, T5, T6>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout && F2.IsRawLayout && F3.IsRawLayout && F4.IsRawLayout && F5.IsRawLayout && F6.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1, T2, T3, T4, T5, T6>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1, T2, T3, T4, T5, T6>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T2, byte>(ref probe.Item2)) != (nint)(F1.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T3, byte>(ref probe.Item3)) != (nint)(F1.FixedSize + F2.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T4, byte>(ref probe.Item4)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T5, byte>(ref probe.Item5)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T6, byte>(ref probe.Item6)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（6 要素）。</summary>
@@ -459,6 +781,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, T7, F1, F2, F
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
         T2 v1 = value.Item2;
@@ -481,6 +804,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, T7, F1, F2, F
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         T2 v1 = F2.Read(ref reader, ref tracker, ref guard);
         T3 v2 = F3.Read(ref reader, ref tracker, ref guard);
@@ -492,6 +816,68 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, T7, F1, F2, F
     }
 
     public static int MinWireSize => F1.MinWireSize + F2.MinWireSize + F3.MinWireSize + F4.MinWireSize + F5.MinWireSize + F6.MinWireSize + F7.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 && F2.FixedSize >= 0 && F3.FixedSize >= 0 && F4.FixedSize >= 0 && F5.FixedSize >= 0 && F6.FixedSize >= 0 && F7.FixedSize >= 0 ? F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize + F7.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1, T2, T3, T4, T5, T6, T7> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+        F2.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize), value.Item2, littleEndian);
+        F3.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize), value.Item3, littleEndian);
+        F4.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize), value.Item4, littleEndian);
+        F5.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), value.Item5, littleEndian);
+        F6.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize), value.Item6, littleEndian);
+        F7.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize), value.Item7, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1, T2, T3, T4, T5, T6, T7> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1, T2, T3, T4, T5, T6, T7>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        T2 v1 = F2.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize), littleEndian);
+        T3 v2 = F3.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize), littleEndian);
+        T4 v3 = F4.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize), littleEndian);
+        T5 v4 = F5.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), littleEndian);
+        T6 v5 = F6.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize), littleEndian);
+        T7 v6 = F7.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize), littleEndian);
+        return new ValueTuple<T1, T2, T3, T4, T5, T6, T7>(v0, v1, v2, v3, v4, v5, v6);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1, T2, T3, T4, T5, T6, T7>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout && F2.IsRawLayout && F3.IsRawLayout && F4.IsRawLayout && F5.IsRawLayout && F6.IsRawLayout && F7.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1, T2, T3, T4, T5, T6, T7>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1, T2, T3, T4, T5, T6, T7>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T2, byte>(ref probe.Item2)) != (nint)(F1.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T3, byte>(ref probe.Item3)) != (nint)(F1.FixedSize + F2.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T4, byte>(ref probe.Item4)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T5, byte>(ref probe.Item5)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T6, byte>(ref probe.Item6)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T7, byte>(ref probe.Item7)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（7 要素）。</summary>
@@ -562,6 +948,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, T7, TRest, F1
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
     {
+        if (FixedSize >= 0) { WriteFixed(ref writer.GetSpanRef(FixedSize), in value, TWriter.IsHostLittleEndian); return; }
         T1 v0 = value.Item1;
         F1.Write(ref writer, in v0, ref tracker);
         T2 v1 = value.Item2;
@@ -586,6 +973,7 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, T7, TRest, F1
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
+        if (FixedSize >= 0) return ReadFixed(in reader.GetSpanRef(FixedSize), TReader.IsHostLittleEndian);
         T1 v0 = F1.Read(ref reader, ref tracker, ref guard);
         T2 v1 = F2.Read(ref reader, ref tracker, ref guard);
         T3 v2 = F3.Read(ref reader, ref tracker, ref guard);
@@ -598,6 +986,71 @@ public readonly struct ValueTupleFormatter<T1, T2, T3, T4, T5, T6, T7, TRest, F1
     }
 
     public static int MinWireSize => F1.MinWireSize + F2.MinWireSize + F3.MinWireSize + F4.MinWireSize + F5.MinWireSize + F6.MinWireSize + F7.MinWireSize + F8.MinWireSize;
+
+    /// <summary>全要素が固定長なら、その合計。</summary>
+    public static int FixedSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => F1.FixedSize >= 0 && F2.FixedSize >= 0 && F3.FixedSize >= 0 && F4.FixedSize >= 0 && F5.FixedSize >= 0 && F6.FixedSize >= 0 && F7.FixedSize >= 0 && F8.FixedSize >= 0 ? F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize + F7.FixedSize + F8.FixedSize : -1;
+    }
+
+    public static bool IsRawLayout
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Layout.IsRaw;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteFixed(ref byte destination, scoped in ValueTuple<T1, T2, T3, T4, T5, T6, T7, TRest> value, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) { Unsafe.WriteUnaligned(ref destination, value); return; }
+        F1.WriteFixed(ref Unsafe.Add(ref destination, 0), value.Item1, littleEndian);
+        F2.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize), value.Item2, littleEndian);
+        F3.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize), value.Item3, littleEndian);
+        F4.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize), value.Item4, littleEndian);
+        F5.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), value.Item5, littleEndian);
+        F6.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize), value.Item6, littleEndian);
+        F7.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize), value.Item7, littleEndian);
+        F8.WriteFixed(ref Unsafe.Add(ref destination, F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize + F7.FixedSize), value.Rest, littleEndian);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ValueTuple<T1, T2, T3, T4, T5, T6, T7, TRest> ReadFixed(ref readonly byte source, bool littleEndian)
+    {
+        if (littleEndian && Layout.IsRaw) return Unsafe.ReadUnaligned<ValueTuple<T1, T2, T3, T4, T5, T6, T7, TRest>>(in source);
+        T1 v0 = F1.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), 0), littleEndian);
+        T2 v1 = F2.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize), littleEndian);
+        T3 v2 = F3.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize), littleEndian);
+        T4 v3 = F4.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize), littleEndian);
+        T5 v4 = F5.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize), littleEndian);
+        T6 v5 = F6.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize), littleEndian);
+        T7 v6 = F7.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize), littleEndian);
+        TRest v7 = F8.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in source), F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize + F7.FixedSize), littleEndian);
+        return new ValueTuple<T1, T2, T3, T4, T5, T6, T7, TRest>(v0, v1, v2, v3, v4, v5, v6, v7);
+    }
+
+    /// <summary>LE 機のメモリ表現がワイヤ形式と一致するか(要素がすべて一致し、すき間なく宣言順に並ぶ)。型ごとに 1 回だけ調べる。</summary>
+    private static class Layout
+    {
+        public static readonly bool IsRaw = Compute();
+
+        private static bool Compute()
+        {
+            if (FixedSize < 0 || Unsafe.SizeOf<ValueTuple<T1, T2, T3, T4, T5, T6, T7, TRest>>() != FixedSize) return false;
+            if (!(F1.IsRawLayout && F2.IsRawLayout && F3.IsRawLayout && F4.IsRawLayout && F5.IsRawLayout && F6.IsRawLayout && F7.IsRawLayout && F8.IsRawLayout)) return false;
+            var probe = default(ValueTuple<T1, T2, T3, T4, T5, T6, T7, TRest>);
+            ref byte start = ref Unsafe.As<ValueTuple<T1, T2, T3, T4, T5, T6, T7, TRest>, byte>(ref probe);
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T1, byte>(ref probe.Item1)) != (nint)(0)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T2, byte>(ref probe.Item2)) != (nint)(F1.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T3, byte>(ref probe.Item3)) != (nint)(F1.FixedSize + F2.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T4, byte>(ref probe.Item4)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T5, byte>(ref probe.Item5)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T6, byte>(ref probe.Item6)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<T7, byte>(ref probe.Item7)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize)) return false;
+            if (Unsafe.ByteOffset(ref start, ref Unsafe.As<TRest, byte>(ref probe.Rest)) != (nint)(F1.FixedSize + F2.FixedSize + F3.FixedSize + F4.FixedSize + F5.FixedSize + F6.FixedSize + F7.FixedSize)) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Tuple（8 要素）。</summary>

@@ -15,6 +15,8 @@
     <RootNamespace>MemoryPack.Tests</RootNamespace>
     <GenerateProgramFile>false</GenerateProgramFile>
     <StartupObject>Upstream.Harness.HarnessProgram</StartupObject>
+    <!-- 計測の再生で ApexPack の公開 API を直接呼ぶ(Upstream.Harness/Recorder.cs の Direct) -->
+    <DefineConstants>$(DefineConstants);APEXPACK_BACKEND</DefineConstants>
     <!-- 上流コードに対する警告は無改変で取り込むため抑止する(Upstream.OnMemoryPack と同じ)。APX003/APX004 は ApexPack.Generator の情報的な警告 -->
     <NoWarn>$(NoWarn);xUnit1004;xUnit1013;xUnit1026;xUnit1030;xUnit2000;xUnit2002;xUnit2013;xUnit2017;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8620;CS8625;CS8629;CS0618;CS0649;CS0169;CS0414;CS9191;APX003;APX004</NoWarn>
   </PropertyGroup>

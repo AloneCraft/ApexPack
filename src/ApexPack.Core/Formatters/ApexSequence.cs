@@ -60,10 +60,11 @@ public static class ApexSequence
         bool le = TWriter.IsHostLittleEndian;
         int count = span.Length;
         int body = checked(count * TFormatter.FixedSize);
-        ref byte p = ref writer.Reserve(checked(body + ApexWire.CompactMaxSize));
-        int headerSize = ApexWire.WriteCompact(ref p, (uint)count + 1, le);
+        // ヘッダーの長さは件数から決まるので、ちょうどの大きさを確保する(正確なサイズの配列へ直接書く経路でも足りるように)
+        int headerSize = ApexWire.CompactSize((uint)count + 1);
+        ref byte p = ref writer.GetSpanRef(checked(headerSize + body));
+        ApexWire.WriteCompact(ref p, (uint)count + 1, le);
         CopyFixedOut<T, TFormatter>(ref Unsafe.Add(ref p, headerSize), span, le);
-        writer.Advance(headerSize + body);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

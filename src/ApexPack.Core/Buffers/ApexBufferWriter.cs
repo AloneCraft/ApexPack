@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -7,13 +8,21 @@ namespace ApexPack.Buffers;
 
 /// <summary>
 /// 自動伸長する writer。初期バッファを外部から受け取れ(スレッドローカルの再利用)、
-/// 不足したら <see cref="ArrayPool{T}"/> から倍々に借りる。借りた配列は <see cref="Dispose"/> で返す。
+/// 足りなくなったら書き終えたバッファはそのまま残して次のバッファ(倍の大きさ、<see cref="ArrayPool{T}"/> から)へ進む。
+/// 伸長のたびにそれまでの内容を写さないので、大きな出力でも写しは最後の <see cref="ToArray"/> の 1 回だけになる。
+/// 借りた配列は <see cref="Dispose"/> で返す。
 /// </summary>
 public ref struct ApexBufferWriter : IApexBufferWriter, IDisposable
 {
     private byte[] _buffer;
     private int _written;
     private bool _rented;
+
+    /// <summary>書き終えたバッファ(先頭から順)。伸長したときだけ作る。</summary>
+    private List<Segment>? _segments;
+    private int _segmentBytes;
+
+    private readonly record struct Segment(byte[] Array, int Length, bool Rented);
 
     public static bool IsHostLittleEndian => BitConverter.IsLittleEndian;
 
@@ -22,6 +31,8 @@ public ref struct ApexBufferWriter : IApexBufferWriter, IDisposable
         _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, 64));
         _written = 0;
         _rented = true;
+        _segments = null;
+        _segmentBytes = 0;
     }
 
     /// <summary>呼び出し側が所有する初期バッファで開始する。この配列はプールへ返さない。</summary>
@@ -30,17 +41,37 @@ public ref struct ApexBufferWriter : IApexBufferWriter, IDisposable
         _buffer = initialBuffer;
         _written = 0;
         _rented = false;
+        _segments = null;
+        _segmentBytes = 0;
     }
 
-    public readonly int BytesWritten => _written;
-    public readonly ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _written);
-    public readonly ReadOnlyMemory<byte> WrittenMemory => _buffer.AsMemory(0, _written);
+    public readonly int BytesWritten => _segmentBytes + _written;
+
+    /// <summary>書いた内容。伸長して複数のバッファにまたがる場合は、つなげた配列を作って返す。</summary>
+    public readonly ReadOnlySpan<byte> WrittenSpan => _segments is null ? _buffer.AsSpan(0, _written) : ToArray();
+
+    /// <summary>書いた内容。伸長して複数のバッファにまたがる場合は、つなげた配列を作って返す。</summary>
+    public readonly ReadOnlyMemory<byte> WrittenMemory => _segments is null ? _buffer.AsMemory(0, _written) : ToArray();
 
     public readonly byte[] ToArray()
     {
-        if (_written == 0) return Array.Empty<byte>();
-        var array = GC.AllocateUninitializedArray<byte>(_written);
-        Unsafe.CopyBlockUnaligned(ref MemoryMarshal.GetArrayDataReference(array), ref MemoryMarshal.GetArrayDataReference(_buffer), (uint)_written);
+        int total = BytesWritten;
+        if (total == 0) return Array.Empty<byte>();
+        var array = GC.AllocateUninitializedArray<byte>(total);
+        ref byte destination = ref MemoryMarshal.GetArrayDataReference(array);
+        int offset = 0;
+        if (_segments is not null)
+        {
+            foreach (var segment in _segments)
+            {
+                Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref destination, offset), ref MemoryMarshal.GetArrayDataReference(segment.Array), (uint)segment.Length);
+                offset += segment.Length;
+            }
+        }
+        if (_written > 0)
+        {
+            Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref destination, offset), ref MemoryMarshal.GetArrayDataReference(_buffer), (uint)_written);
+        }
         return array;
     }
 
@@ -68,25 +99,40 @@ public ref struct ApexBufferWriter : IApexBufferWriter, IDisposable
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void Grow(int size)
     {
-        long required = (long)_written + (uint)size;
+        long required = (long)BytesWritten + (uint)size;
         if (size < 0 || required > Array.MaxLength)
         {
             throw new InvalidOperationException($"Serialized payload exceeds the maximum array length ({required} bytes).");
         }
 
-        int newCapacity = (int)Math.Min(Math.Max((long)_buffer.Length * 2, required), Array.MaxLength);
-        var newBuffer = ArrayPool<byte>.Shared.Rent(newCapacity);
-        _buffer.AsSpan(0, _written).CopyTo(newBuffer);
-        if (_rented)
+        // 今のバッファは書いた分だけ残し、次のバッファへ進む(それまでの内容は写さない)
+        if (_written > 0)
+        {
+            (_segments ??= new List<Segment>()).Add(new Segment(_buffer, _written, _rented));
+            _segmentBytes += _written;
+        }
+        else if (_rented)
         {
             ArrayPool<byte>.Shared.Return(_buffer);
         }
-        _buffer = newBuffer;
+
+        int newCapacity = (int)Math.Min(Math.Max((long)_buffer.Length * 2, size), Array.MaxLength);
+        _buffer = ArrayPool<byte>.Shared.Rent(newCapacity);
+        _written = 0;
         _rented = true;
     }
 
     public void Dispose()
     {
+        if (_segments is not null)
+        {
+            foreach (var segment in _segments)
+            {
+                if (segment.Rented) ArrayPool<byte>.Shared.Return(segment.Array);
+            }
+            _segments = null;
+            _segmentBytes = 0;
+        }
         if (_rented && _buffer is not null)
         {
             ArrayPool<byte>.Shared.Return(_buffer);

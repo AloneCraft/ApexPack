@@ -135,7 +135,8 @@ public class SecurityDefenseTests
         var allowed = ApexPackSerializer.Deserialize<Type>(bytes, new ApexSerializerOptions
         {
             Security = ApexSecurityOptions.Default,
-            TypeResolver = name => name == typeof(string).AssemblyQualifiedName ? typeof(string) : null
+            // 型名は Version / Culture / PublicKeyToken を除いた形で書かれる
+            TypeResolver = name => name == "System.String, System.Private.CoreLib" ? typeof(string) : null
         });
         Assert.Equal(typeof(string), allowed);
     }
