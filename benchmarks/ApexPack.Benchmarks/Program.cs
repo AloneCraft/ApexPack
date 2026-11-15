@@ -33,10 +33,36 @@ public static class Program
 {
     public static void Main(string[] args)
     {
+        if (args.Length > 0 && (args[0] == "--cli" || args[0] == "--json"))
+        {
+            Console.WriteLine("Running ApexPack.BenchmarkSuite in Headless CLI mode...");
+            // 他プロセスの負荷による揺れを減らすため、計測中だけ自プロセスの優先度を上げる
+            Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+            System.Threading.Thread.CurrentThread.Priority = System.Threading.ThreadPriority.Highest;
+            var report = ApexPack.BenchmarkSuite.Runner.BenchmarkEngine.RunAll((desc, cur, tot) =>
+            {
+                Console.WriteLine($"[{cur}/{tot}] {desc}...");
+            });
+
+            Console.WriteLine();
+            Console.WriteLine("==========================================================================");
+            Console.WriteLine($" Geometric Mean Serialize Speedup   : {report.GeometricMeanSerializeSpeedup:F2}x vs MemoryPack");
+            Console.WriteLine($" Geometric Mean Deserialize Speedup : {report.GeometricMeanDeserializeSpeedup:F2}x vs MemoryPack");
+            Console.WriteLine($" Total Payload Size Ratio           : {report.TotalSizeRatioVsMp * 100:F1}%");
+            Console.WriteLine($" Deep Structural Equivalence        : {(report.AllVerified ? "ALL PASS (100%)" : "FAIL")}");
+            Console.WriteLine("==========================================================================");
+
+            string outPath = (args.Length > 1 && args[0] == "--json") ? args[1] : "benchmark_report.json";
+            string json = System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            System.IO.File.WriteAllText(outPath, json);
+            Console.WriteLine($"Benchmark report successfully written to: {System.IO.Path.GetFullPath(outPath)}");
+            return;
+        }
+
         Console.WriteLine("==========================================================================");
         Console.WriteLine("          ApexPack vs MemoryPack Head-to-Head Performance Benchmark        ");
         Console.WriteLine("==========================================================================");
-        Console.WriteLine($"Hardware SIMD Acceleration: AVX2/Vector256={ApexPack.Hardware.HardwareIntrinsics.HasVector256}, BMI2={ApexPack.Hardware.HardwareIntrinsics.HasBmi2}");
+        Console.WriteLine($"Hardware SIMD Acceleration: Vector256={System.Runtime.Intrinsics.Vector256.IsHardwareAccelerated}, Vector128={System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated}");
         Console.WriteLine();
 
         // -----------------------------------------------------------------------
@@ -126,19 +152,8 @@ public static class Program
 
         // ApexPack (Sequential Fast-Path)
         sw.Restart();
-        byte[] apexSeqBytes;
-        var seqWriter = new ApexBufferWriter(largeCount * 32);
-        try
-        {
-            ApexPackSerializer.SerializeArray(ref seqWriter, largePersons);
-            apexSeqBytes = seqWriter.ToArray();
-        }
-        finally
-        {
-            seqWriter.Dispose();
-        }
-        var seqReader = new ApexSpanReader(apexSeqBytes);
-        var apexSeqRestored = ApexPackSerializer.DeserializeArray<Person, ApexSpanReader>(ref seqReader);
+        byte[] apexSeqBytes = ApexPackSerializer.SerializeArray(largePersons);
+        var apexSeqRestored = ApexPackSerializer.DeserializeArray<Person>(apexSeqBytes);
         sw.Stop();
         double apexSeqMs = sw.Elapsed.TotalMilliseconds;
         Console.WriteLine($"[ApexPack (Sequential)]      100,000 items in {apexSeqMs:F2} ms ({(largeCount / (apexSeqMs / 1000)):N0} items/sec)");

@@ -1,5 +1,5 @@
-using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
 using Microsoft.CodeAnalysis;
@@ -9,546 +9,172 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace ApexPack.Generator;
 
+/// <summary>
+/// [ApexPackable] 型に ISerializePackable&lt;T&gt; の実装を生成する。
+/// </summary>
 [Generator]
-public class ApexPackGenerator : IIncrementalGenerator
+public sealed class ApexPackGenerator : IIncrementalGenerator
 {
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var typeDeclarations = context.SyntaxProvider
-            .CreateSyntaxProvider(
-                predicate: static (s, _) => IsCandidateTarget(s),
-                transform: static (ctx, _) => GetSemanticTarget(ctx))
-            .Where(static m => m is not null);
+        var types = context.SyntaxProvider.ForAttributeWithMetadataName(
+            "ApexPack.ApexPackableAttribute",
+            predicate: static (node, _) => node is TypeDeclarationSyntax,
+            transform: static (ctx, _) => (INamedTypeSymbol)ctx.TargetSymbol);
 
-        var compilationAndTypes = context.CompilationProvider.Combine(typeDeclarations.Collect());
-
-        context.RegisterSourceOutput(compilationAndTypes, static (spc, source) =>
-        {
-            var (compilation, targets) = source;
-            if (targets.IsDefaultOrEmpty) return;
-
-            var distinctTargets = targets.Distinct(SymbolEqualityComparer.Default).OfType<INamedTypeSymbol>();
-
-            foreach (var typeSymbol in distinctTargets)
-            {
-                var sourceCode = GenerateSerializationCode(typeSymbol);
-                if (!string.IsNullOrEmpty(sourceCode))
-                {
-                    string hintName = $"{typeSymbol.ToDisplayString().Replace('.', '_').Replace('<', '_').Replace('>', '_')}_ApexPack.g.cs";
-                    spc.AddSource(hintName, SourceText.From(sourceCode, Encoding.UTF8));
-                }
-            }
-        });
+        var source = context.CompilationProvider.Combine(types.Collect());
+        context.RegisterSourceOutput(source, static (spc, input) => Execute(spc, input.Left, input.Right));
     }
 
-    private static bool IsCandidateTarget(SyntaxNode node)
+    private static void Execute(SourceProductionContext context, Compilation compilation, ImmutableArray<INamedTypeSymbol> symbols)
     {
-        return node is TypeDeclarationSyntax tds && tds.AttributeLists.Count > 0;
+        if (symbols.IsDefaultOrEmpty) return;
+
+        var diagnostics = new List<Diagnostic>();
+        var analyzer = new TypeAnalyzer(compilation, diagnostics);
+        var registrations = new List<TypeModel>();
+        var seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+
+        foreach (var symbol in symbols)
+        {
+            if (!seen.Add(symbol)) continue;
+            if (!CheckPartial(symbol, diagnostics)) continue;
+
+            var model = analyzer.Analyze(symbol);
+            if (model is null) continue;
+
+            context.AddSource(HintName(symbol), SourceText.From(CodeEmitter.Emit(model), Encoding.UTF8));
+            if (CanRegister(symbol)) registrations.Add(model);
+        }
+
+        foreach (var diagnostic in diagnostics) context.ReportDiagnostic(diagnostic);
+
+        if (registrations.Count > 0)
+        {
+            context.AddSource("ApexPack.ModuleInitializer.g.cs", SourceText.From(EmitRegistration(compilation, registrations), Encoding.UTF8));
+        }
     }
 
-    private static INamedTypeSymbol? GetSemanticTarget(GeneratorSyntaxContext context)
+    private static bool CheckPartial(INamedTypeSymbol symbol, List<Diagnostic> diagnostics)
     {
-        var typeDecl = (TypeDeclarationSyntax)context.Node;
-        var model = context.SemanticModel;
-        var symbol = model.GetDeclaredSymbol(typeDecl) as INamedTypeSymbol;
-        if (symbol == null) return null;
-
-        foreach (var attr in symbol.GetAttributes())
+        if (!IsPartial(symbol))
         {
-            if (attr.AttributeClass?.Name is "ApexPackableAttribute" or "ApexPackable")
+            diagnostics.Add(Diagnostic.Create(Diagnostics.MustBePartial, symbol.Locations.FirstOrDefault(), symbol.Name));
+            return false;
+        }
+        for (var c = symbol.ContainingType; c is not null; c = c.ContainingType)
+        {
+            if (!IsPartial(c))
             {
-                return symbol;
+                diagnostics.Add(Diagnostic.Create(Diagnostics.ContainerMustBePartial, symbol.Locations.FirstOrDefault(), c.Name, symbol.Name));
+                return false;
             }
         }
-        return null;
+        return true;
     }
 
-    private static string GenerateSerializationCode(INamedTypeSymbol typeSymbol)
+    private static bool IsPartial(INamedTypeSymbol symbol)
+        => symbol.DeclaringSyntaxReferences.Any(r => r.GetSyntax() is TypeDeclarationSyntax t && t.Modifiers.Any(SyntaxKind.PartialKeyword));
+
+    private static string HintName(INamedTypeSymbol symbol)
     {
-        string ns = typeSymbol.ContainingNamespace.IsGlobalNamespace
-            ? ""
-            : $"namespace {typeSymbol.ContainingNamespace.ToDisplayString()};";
-
-        string typeKeyword = typeSymbol.IsValueType ? (typeSymbol.IsRecord ? "record struct" : "struct") : (typeSymbol.IsRecord ? "record" : "class");
-        string typeName = typeSymbol.Name;
-
-        var members = GetSerializableMembers(typeSymbol);
-        bool isUnmanaged = typeSymbol.IsValueType && typeSymbol.IsUnmanagedType;
-
+        var name = symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", "");
         var sb = new StringBuilder();
-        sb.AppendLine("// <auto-generated />");
-        sb.AppendLine("#nullable enable");
-        sb.AppendLine("using System;");
-        sb.AppendLine("using System.Runtime.CompilerServices;");
-        sb.AppendLine("using ApexPack;");
-        sb.AppendLine("using ApexPack.Buffers;");
-        sb.AppendLine();
+        foreach (char c in name) sb.Append(char.IsLetterOrDigit(c) ? c : '_');
+        if (symbol.Arity > 0) sb.Append('`').Append(symbol.Arity);
+        return sb.Append(".ApexPack.g.cs").ToString();
+    }
 
-        if (!string.IsNullOrEmpty(ns))
+    /// <summary>モジュール初期化子から参照できる(非ジェネリックで private/protected でない)型だけ登録する。</summary>
+    private static bool CanRegister(INamedTypeSymbol symbol)
+    {
+        for (INamedTypeSymbol? t = symbol; t is not null; t = t.ContainingType)
         {
-            sb.AppendLine(ns);
-            sb.AppendLine();
+            if (t.IsGenericType) return false;
+            if (t.DeclaredAccessibility is not (Accessibility.Public or Accessibility.Internal or Accessibility.ProtectedOrInternal)) return false;
         }
+        return true;
+    }
 
-        sb.AppendLine($"partial {typeKeyword} {typeName} : ISerializePackable<{typeName}>");
-        sb.AppendLine("{");
-
-        // Static forwarders
-        sb.AppendLine($"    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-        sb.AppendLine($"    public static void Serialize<TWriter>(ref TWriter writer, scoped in {typeName} value)");
-        sb.AppendLine($"        where TWriter : IApexBufferWriter, allows ref struct");
-        sb.AppendLine($"    {{");
-        sb.AppendLine($"        var nullTracker = new NullReferenceTracker();");
-        sb.AppendLine($"        SerializeWithTracker(ref writer, in value, ref nullTracker);");
-        sb.AppendLine($"    }}");
-        sb.AppendLine();
-        sb.AppendLine($"    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-        sb.AppendLine($"    public static void Deserialize<TReader>(ref TReader reader, scoped out {typeName} value)");
-        sb.AppendLine($"        where TReader : IApexBufferReader, allows ref struct");
-        sb.AppendLine($"    {{");
-        sb.AppendLine($"        var nullTracker = new NullReferenceTracker();");
-        sb.AppendLine($"        DeserializeWithTracker(ref reader, out value, ref nullTracker);");
-        sb.AppendLine($"    }}");
-        sb.AppendLine();
-
-        if (isUnmanaged)
+    /// <summary>
+    /// 型ごとのフォーマッタをジェネリック static スロットへ登録する(NativeAOT でもリフレクションなしで解決するため)。
+    /// 登録先は型ごとの <c>ApexFormatterCache&lt;T&gt;</c> だけで、この型がアンロードされれば一緒に解放される。
+    /// </summary>
+    private static string EmitRegistration(Compilation compilation, List<TypeModel> models)
+    {
+        var sb = new StringBuilder();
+        sb.Append("// <auto-generated> ApexPack.Generator </auto-generated>\n");
+        sb.Append("#pragma warning disable CA2255, CS0612, CS0618\n");
+        var asm = compilation.AssemblyName ?? "Assembly";
+        var id = new StringBuilder();
+        foreach (char c in asm) id.Append(char.IsLetterOrDigit(c) ? c : '_');
+        sb.Append("namespace ApexPack.Generated\n{\n");
+        sb.Append($"    internal static class ApexPackModuleInitializer_{id}\n    {{\n");
+        sb.Append("        [global::System.Runtime.CompilerServices.ModuleInitializer]\n");
+        sb.Append("        internal static void Initialize()\n        {\n");
+        foreach (var model in models)
         {
-            GenerateUnmanagedMethods(sb, typeName);
+            var name = TypeAnalyzer.Name(model.Symbol);
+            string preserve = model.PreserveReferences ? "true" : "false";
+            sb.Append($"            global::ApexPack.ApexFormatterCache<{name}>.Register(new global::ApexPack.FormatterAdapter<{name}, global::ApexPack.PackableFormatter<{name}>>({preserve}));\n");
         }
-        else
-        {
-            GenerateComplexMethods(sb, typeSymbol, members);
-        }
-
-        sb.AppendLine("}");
+        sb.Append("        }\n    }\n}\n");
         return sb.ToString();
     }
+}
 
-    private static void GenerateUnmanagedMethods(StringBuilder sb, string typeName)
-    {
-        sb.AppendLine($"    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-        sb.AppendLine($"    public static void SerializeWithTracker<TWriter, TTracker>(ref TWriter writer, scoped in {typeName} value, ref TTracker tracker)");
-        sb.AppendLine($"        where TWriter : IApexBufferWriter, allows ref struct");
-        sb.AppendLine($"        where TTracker : IReferenceTracker, allows ref struct");
-        sb.AppendLine($"    {{");
-        sb.AppendLine($"        writer.WriteUnmanaged(in value);");
-        sb.AppendLine($"    }}");
-        sb.AppendLine();
-        sb.AppendLine($"    [MethodImpl(MethodImplOptions.AggressiveInlining)]");
-        sb.AppendLine($"    public static void DeserializeWithTracker<TReader, TTracker>(ref TReader reader, scoped out {typeName} value, ref TTracker tracker)");
-        sb.AppendLine($"        where TReader : IApexBufferReader, allows ref struct");
-        sb.AppendLine($"        where TTracker : IReferenceTracker, allows ref struct");
-        sb.AppendLine($"    {{");
-        sb.AppendLine($"        value = reader.ReadUnmanaged<{typeName}>();");
-        sb.AppendLine($"    }}");
-    }
+internal static class Diagnostics
+{
+    private const string Category = "ApexPack";
 
-    private class MemberInfo
-    {
-        public ISymbol Symbol { get; set; } = null!;
-        public ITypeSymbol Type { get; set; } = null!;
-        public string Name { get; set; } = null!;
-        public bool IsBool { get; set; }
-        public bool IsNullableValueType { get; set; }
-        public bool IsNullableRefType { get; set; }
-        public bool IsBitPackable => IsBool || IsNullableValueType || IsNullableRefType;
-    }
+    public static readonly DiagnosticDescriptor MustBePartial = new(
+        "APX001", "Type must be partial", "[ApexPackable] type '{0}' must be declared partial", Category, DiagnosticSeverity.Error, true);
 
-    private static List<MemberInfo> GetSerializableMembers(INamedTypeSymbol typeSymbol)
-    {
-        var list = new List<MemberInfo>();
-        foreach (var member in typeSymbol.GetMembers())
-        {
-            if (member.IsStatic || member.DeclaredAccessibility != Accessibility.Public) continue;
-            if (HasApexIgnore(member)) continue;
+    public static readonly DiagnosticDescriptor ContainerMustBePartial = new(
+        "APX002", "Containing type must be partial", "Containing type '{0}' of [ApexPackable] type '{1}' must be declared partial", Category, DiagnosticSeverity.Error, true);
 
-            if (member is IFieldSymbol fs)
-            {
-                if (fs.IsConst || fs.IsReadOnly) continue;
-                list.Add(CreateMemberInfo(fs, fs.Type, fs.Name));
-            }
-            else if (member is IPropertySymbol ps)
-            {
-                if (ps.IsIndexer || ps.GetMethod == null || ps.SetMethod == null) continue;
-                list.Add(CreateMemberInfo(ps, ps.Type, ps.Name));
-            }
-        }
-        return list;
-    }
+    public static readonly DiagnosticDescriptor RuntimeResolved = new(
+        "APX003", "Formatter resolved at runtime",
+        "No compile-time formatter for '{0}'; it is resolved through ApexFormatterCache at runtime (register a formatter or mark the type [ApexPackable])",
+        Category, DiagnosticSeverity.Warning, true);
 
-    private static bool HasApexIgnore(ISymbol symbol)
-    {
-        return symbol.GetAttributes().Any(a => a.AttributeClass?.Name is "ApexIgnoreAttribute" or "ApexIgnore");
-    }
+    public static readonly DiagnosticDescriptor NonPortableStruct = new(
+        "APX004", "Struct is serialized by raw memory copy",
+        "'{0}' is not [ApexPackable]; it is copied as raw memory, which is not portable across endianness or layout changes",
+        Category, DiagnosticSeverity.Warning, true);
 
-    private static MemberInfo CreateMemberInfo(ISymbol symbol, ITypeSymbol type, string name)
-    {
-        bool isBool = type.SpecialType == SpecialType.System_Boolean;
-        bool isNullableValue = type.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T;
-        bool isNullableRef = !type.IsValueType && (type.NullableAnnotation == NullableAnnotation.Annotated || type.SpecialType == SpecialType.System_String);
+    public static readonly DiagnosticDescriptor NoConstructor = new(
+        "APX005", "No usable constructor",
+        "[ApexPackable] type '{0}' needs a parameterless constructor, a single constructor, or one marked [ApexConstructor]",
+        Category, DiagnosticSeverity.Error, true);
 
-        return new MemberInfo
-        {
-            Symbol = symbol,
-            Type = type,
-            Name = name,
-            IsBool = isBool,
-            IsNullableValueType = isNullableValue,
-            IsNullableRefType = isNullableRef
-        };
-    }
+    public static readonly DiagnosticDescriptor ConstructorParameterMismatch = new(
+        "APX006", "Constructor parameter does not match a member",
+        "Constructor parameter '{0}' does not match any serialized member (names are compared case-insensitively)",
+        Category, DiagnosticSeverity.Error, true);
 
-    private static void GenerateComplexMethods(StringBuilder sb, INamedTypeSymbol typeSymbol, List<MemberInfo> members)
-    {
-        string typeName = typeSymbol.Name;
-        bool isClass = !typeSymbol.IsValueType;
+    public static readonly DiagnosticDescriptor UnionWithoutCases = new(
+        "APX007", "Abstract type without [ApexUnion]",
+        "Abstract class or interface '{0}' needs at least one [ApexUnion(tag, typeof(Derived))]", Category, DiagnosticSeverity.Error, true);
 
-        var bitPackMembers = members.Where(m => m.IsBitPackable).Take(64).ToList();
-        int bitCount = bitPackMembers.Count;
+    public static readonly DiagnosticDescriptor VersioningNotSupported = new(
+        "APX008", "Versioning is not supported", "[ApexPackable(Versioning = true)] on '{0}' is not supported", Category, DiagnosticSeverity.Error, true);
 
-        // SerializeWithTracker
-        sb.AppendLine($"    public static void SerializeWithTracker<TWriter, TTracker>(ref TWriter writer, scoped in {typeName} value, ref TTracker tracker)");
-        sb.AppendLine($"        where TWriter : IApexBufferWriter, allows ref struct");
-        sb.AppendLine($"        where TTracker : IReferenceTracker, allows ref struct");
-        sb.AppendLine($"    {{");
+    public static readonly DiagnosticDescriptor InstanceOnDeserializing = new(
+        "APX009", "Instance [ApexOnDeserializing] needs early construction",
+        "Instance method '{0}' marked [ApexOnDeserializing] requires a class with a parameterless constructor and only settable members; make it static",
+        Category, DiagnosticSeverity.Error, true);
 
-        if (isClass)
-        {
-            sb.AppendLine($"        if (value is null)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            writer.WriteByte(0); // Null tag");
-            sb.AppendLine($"            return;");
-            sb.AppendLine($"        }}");
-            sb.AppendLine();
-            sb.AppendLine($"        if (TTracker.IsTrackingEnabled)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            if (tracker.TryGetReferenceId(value, out uint existingId))");
-            sb.AppendLine($"            {{");
-            sb.AppendLine($"                writer.WriteByte(2); // Backreference tag");
-            sb.AppendLine($"                writer.WriteUInt32(existingId);");
-            sb.AppendLine($"                return;");
-            sb.AppendLine($"            }}");
-            sb.AppendLine($"            uint newId = tracker.NextId();");
-            sb.AppendLine($"            tracker.Register(value, newId);");
-            sb.AppendLine($"            writer.WriteByte(1); // Normal instance with tracking tag");
-            sb.AppendLine($"            writer.WriteUInt32(newId);");
-            sb.AppendLine($"        }}");
-            sb.AppendLine($"        else");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            writer.WriteByte(1); // Normal instance tag");
-            sb.AppendLine($"        }}");
-            sb.AppendLine();
-        }
+    public static readonly DiagnosticDescriptor InvalidOrder = new(
+        "APX010", "Invalid [ApexOrder]", "When [ApexOrder] is used on '{0}', every serialized member needs a unique order", Category, DiagnosticSeverity.Error, true);
 
-        // Bitmask calculation
-        if (bitCount > 0)
-        {
-            string maskType = bitCount <= 8 ? "byte" : bitCount <= 16 ? "ushort" : bitCount <= 32 ? "uint" : "ulong";
-            sb.AppendLine($"        {maskType} bitmask = 0;");
-            for (int i = 0; i < bitCount; i++)
-            {
-                var m = bitPackMembers[i];
-                if (m.IsBool)
-                {
-                    sb.AppendLine($"        if (value.{m.Name}) bitmask |= ({maskType})(1UL << {i});");
-                }
-                else if (m.IsNullableValueType)
-                {
-                    sb.AppendLine($"        if (value.{m.Name}.HasValue) bitmask |= ({maskType})(1UL << {i});");
-                }
-                else if (m.IsNullableRefType)
-                {
-                    sb.AppendLine($"        if (value.{m.Name} is not null) bitmask |= ({maskType})(1UL << {i});");
-                }
-            }
+    public static readonly DiagnosticDescriptor DuplicateUnionTag = new(
+        "APX011", "Duplicate union tag", "Union tag {0} is registered more than once", Category, DiagnosticSeverity.Error, true);
 
-            if (bitCount <= 8) sb.AppendLine($"        writer.WriteBitmask8(bitmask);");
-            else if (bitCount <= 16) sb.AppendLine($"        writer.WriteBitmask16(bitmask);");
-            else if (bitCount <= 32) sb.AppendLine($"        writer.WriteBitmask32(bitmask);");
-            else sb.AppendLine($"        writer.WriteBitmask64(bitmask);");
-            sb.AppendLine();
-        }
+    public static readonly DiagnosticDescriptor InvalidCollectionType = new(
+        "APX012", "Invalid collection type",
+        "GenerateType.Collection type '{0}' must be a class implementing ICollection<T> with a parameterless constructor", Category, DiagnosticSeverity.Error, true);
 
-        // Write non-bitpacked members first
-        foreach (var m in members.Where(m => !m.IsBitPackable))
-        {
-            EmitWriteMember(sb, m, "value." + m.Name);
-        }
-
-        // Write present bit-packed members
-        foreach (var m in bitPackMembers)
-        {
-            if (m.IsBool) continue;
-
-            if (m.IsNullableValueType)
-            {
-                var innerType = ((INamedTypeSymbol)m.Type).TypeArguments[0];
-                sb.AppendLine($"        if (value.{m.Name}.HasValue)");
-                sb.AppendLine($"        {{");
-                EmitWriteValue(sb, innerType, $"value.{m.Name}.GetValueOrDefault()");
-                sb.AppendLine($"        }}");
-            }
-            else if (m.IsNullableRefType)
-            {
-                sb.AppendLine($"        if (value.{m.Name} is not null)");
-                sb.AppendLine($"        {{");
-                EmitWriteValue(sb, m.Type, $"value.{m.Name}!");
-                sb.AppendLine($"        }}");
-            }
-        }
-
-        sb.AppendLine($"    }}");
-        sb.AppendLine();
-
-        // DeserializeWithTracker
-        sb.AppendLine($"    public static void DeserializeWithTracker<TReader, TTracker>(ref TReader reader, scoped out {typeName} value, ref TTracker tracker)");
-        sb.AppendLine($"        where TReader : IApexBufferReader, allows ref struct");
-        sb.AppendLine($"        where TTracker : IReferenceTracker, allows ref struct");
-        sb.AppendLine($"    {{");
-
-        if (isClass)
-        {
-            sb.AppendLine($"        byte tag = reader.ReadByte();");
-            sb.AppendLine($"        if (tag == 0)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            value = null!;");
-            sb.AppendLine($"            return;");
-            sb.AppendLine($"        }}");
-            sb.AppendLine($"        uint referenceId = 0;");
-            sb.AppendLine($"        if (TTracker.IsTrackingEnabled)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            if (tag == 2)");
-            sb.AppendLine($"            {{");
-            sb.AppendLine($"                uint backId = reader.ReadUInt32();");
-            sb.AppendLine($"                if (tracker.TryGetObject(backId, out var existing))");
-            sb.AppendLine($"                {{");
-            sb.AppendLine($"                    value = ({typeName})existing!;");
-            sb.AppendLine($"                    return;");
-            sb.AppendLine($"                }}");
-            sb.AppendLine($"            }}");
-            sb.AppendLine($"            referenceId = reader.ReadUInt32();");
-            sb.AppendLine($"        }}");
-            sb.AppendLine();
-            sb.AppendLine($"        var instance = new {typeName}();");
-            sb.AppendLine($"        if (TTracker.IsTrackingEnabled && referenceId != 0)");
-            sb.AppendLine($"        {{");
-            sb.AppendLine($"            tracker.Register(instance, referenceId);");
-            sb.AppendLine($"        }}");
-        }
-        else
-        {
-            sb.AppendLine($"        var instance = default({typeName});");
-        }
-
-        // Read bitmask
-        if (bitCount > 0)
-        {
-            string maskType = bitCount <= 8 ? "byte" : bitCount <= 16 ? "ushort" : bitCount <= 32 ? "uint" : "ulong";
-            string readCall = bitCount <= 8 ? "reader.ReadBitmask8()" : bitCount <= 16 ? "reader.ReadBitmask16()" : bitCount <= 32 ? "reader.ReadBitmask32()" : "reader.ReadBitmask64()";
-            sb.AppendLine($"        {maskType} bitmask = {readCall};");
-        }
-
-        // Read non-bitpacked members
-        foreach (var m in members.Where(m => !m.IsBitPackable))
-        {
-            string localName = "v_" + m.Name;
-            EmitReadIntoLocal(sb, m.Type, localName);
-            sb.AppendLine($"        instance.{m.Name} = {localName}!;");
-        }
-
-        // Read bit-packed members
-        for (int i = 0; i < bitPackMembers.Count; i++)
-        {
-            var m = bitPackMembers[i];
-            string localName = "v_" + m.Name;
-            if (m.IsBool)
-            {
-                sb.AppendLine($"        instance.{m.Name} = (bitmask & (1UL << {i})) != 0;");
-            }
-            else if (m.IsNullableValueType)
-            {
-                var innerType = ((INamedTypeSymbol)m.Type).TypeArguments[0];
-                sb.AppendLine($"        if ((bitmask & (1UL << {i})) != 0)");
-                sb.AppendLine($"        {{");
-                EmitReadIntoLocal(sb, innerType, "tmp_" + m.Name);
-                sb.AppendLine($"            instance.{m.Name} = tmp_{m.Name};");
-                sb.AppendLine($"        }}");
-                sb.AppendLine($"        else");
-                sb.AppendLine($"        {{");
-                sb.AppendLine($"            instance.{m.Name} = default;");
-                sb.AppendLine($"        }}");
-            }
-            else if (m.IsNullableRefType)
-            {
-                sb.AppendLine($"        if ((bitmask & (1UL << {i})) != 0)");
-                sb.AppendLine($"        {{");
-                EmitReadIntoLocal(sb, m.Type, "tmp_" + m.Name);
-                sb.AppendLine($"            instance.{m.Name} = tmp_{m.Name}!;");
-                sb.AppendLine($"        }}");
-                sb.AppendLine($"        else");
-                sb.AppendLine($"        {{");
-                sb.AppendLine($"            instance.{m.Name} = default!;");
-                sb.AppendLine($"        }}");
-            }
-        }
-
-        sb.AppendLine($"        value = instance;");
-        sb.AppendLine($"    }}");
-    }
-
-    private static void EmitWriteMember(StringBuilder sb, MemberInfo m, string access)
-    {
-        EmitWriteValue(sb, m.Type, access);
-    }
-
-    private static void EmitWriteValue(StringBuilder sb, ITypeSymbol type, string access)
-    {
-        switch (type.SpecialType)
-        {
-            case SpecialType.System_Byte: sb.AppendLine($"        writer.WriteByte({access});"); return;
-            case SpecialType.System_SByte: sb.AppendLine($"        writer.WriteSByte({access});"); return;
-            case SpecialType.System_Char: sb.AppendLine($"        writer.WriteChar({access});"); return;
-            case SpecialType.System_Int16: sb.AppendLine($"        writer.WriteInt16({access});"); return;
-            case SpecialType.System_UInt16: sb.AppendLine($"        writer.WriteUInt16({access});"); return;
-            case SpecialType.System_Int32: sb.AppendLine($"        writer.WriteInt32({access});"); return;
-            case SpecialType.System_UInt32: sb.AppendLine($"        writer.WriteUInt32({access});"); return;
-            case SpecialType.System_Int64: sb.AppendLine($"        writer.WriteInt64({access});"); return;
-            case SpecialType.System_UInt64: sb.AppendLine($"        writer.WriteUInt64({access});"); return;
-            case SpecialType.System_Single: sb.AppendLine($"        writer.WriteSingle({access});"); return;
-            case SpecialType.System_Double: sb.AppendLine($"        writer.WriteDouble({access});"); return;
-            case SpecialType.System_Boolean: sb.AppendLine($"        writer.WriteBoolean({access});"); return;
-            case SpecialType.System_Decimal: sb.AppendLine($"        writer.WriteDecimal({access});"); return;
-            case SpecialType.System_DateTime: sb.AppendLine($"        writer.WriteDateTime({access});"); return;
-            case SpecialType.System_String: sb.AppendLine($"        writer.WriteString({access});"); return;
-        }
-
-        string typeName = type.ToDisplayString();
-        if (typeName == "System.Guid")
-        {
-            sb.AppendLine($"        writer.WriteGuid({access});");
-            return;
-        }
-        if (typeName == "System.TimeSpan")
-        {
-            sb.AppendLine($"        writer.WriteTimeSpan({access});");
-            return;
-        }
-
-        if (type.TypeKind == TypeKind.Enum)
-        {
-            var underlying = ((INamedTypeSymbol)type).EnumUnderlyingType!;
-            EmitWriteValue(sb, underlying, $"({underlying.ToDisplayString()}){access}");
-            return;
-        }
-
-        if (type is IArrayTypeSymbol arrayType)
-        {
-            var elemType = arrayType.ElementType;
-            if (elemType.IsValueType && elemType.IsUnmanagedType)
-            {
-                sb.AppendLine($"        ApexPackSerializer.SerializeUnmanagedArray(ref writer, {access});");
-            }
-            else
-            {
-                sb.AppendLine($"        ApexPackSerializer.SerializeArrayWithTracker(ref writer, {access}, ref tracker);");
-            }
-            return;
-        }
-
-        if (type is INamedTypeSymbol namedType && namedType.IsGenericType && namedType.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.List<T>")
-        {
-            var elemType = namedType.TypeArguments[0];
-            if (elemType.IsValueType && elemType.IsUnmanagedType)
-            {
-                sb.AppendLine($"        ApexPackSerializer.SerializeUnmanagedList(ref writer, {access});");
-            }
-            else
-            {
-                sb.AppendLine($"        ApexPackSerializer.SerializeListWithTracker(ref writer, {access}, ref tracker);");
-            }
-            return;
-        }
-
-        var unannotatedType = type.WithNullableAnnotation(NullableAnnotation.NotAnnotated);
-        string fullType = unannotatedType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-        string tmpVarName = "_tmp_" + Math.Abs(access.GetHashCode()).ToString();
-        sb.AppendLine($"        var {tmpVarName} = {access};");
-        sb.AppendLine($"        {fullType}.SerializeWithTracker(ref writer, in {tmpVarName}, ref tracker);");
-    }
-
-    private static void EmitReadIntoLocal(StringBuilder sb, ITypeSymbol type, string localName)
-    {
-        switch (type.SpecialType)
-        {
-            case SpecialType.System_Byte: sb.AppendLine($"        byte {localName} = reader.ReadByte();"); return;
-            case SpecialType.System_SByte: sb.AppendLine($"        sbyte {localName} = reader.ReadSByte();"); return;
-            case SpecialType.System_Char: sb.AppendLine($"        char {localName} = reader.ReadChar();"); return;
-            case SpecialType.System_Int16: sb.AppendLine($"        short {localName} = reader.ReadInt16();"); return;
-            case SpecialType.System_UInt16: sb.AppendLine($"        ushort {localName} = reader.ReadUInt16();"); return;
-            case SpecialType.System_Int32: sb.AppendLine($"        int {localName} = reader.ReadInt32();"); return;
-            case SpecialType.System_UInt32: sb.AppendLine($"        uint {localName} = reader.ReadUInt32();"); return;
-            case SpecialType.System_Int64: sb.AppendLine($"        long {localName} = reader.ReadInt64();"); return;
-            case SpecialType.System_UInt64: sb.AppendLine($"        ulong {localName} = reader.ReadUInt64();"); return;
-            case SpecialType.System_Single: sb.AppendLine($"        float {localName} = reader.ReadSingle();"); return;
-            case SpecialType.System_Double: sb.AppendLine($"        double {localName} = reader.ReadDouble();"); return;
-            case SpecialType.System_Boolean: sb.AppendLine($"        bool {localName} = reader.ReadBoolean();"); return;
-            case SpecialType.System_Decimal: sb.AppendLine($"        decimal {localName} = reader.ReadDecimal();"); return;
-            case SpecialType.System_DateTime: sb.AppendLine($"        DateTime {localName} = reader.ReadDateTime();"); return;
-            case SpecialType.System_String: sb.AppendLine($"        string? {localName} = reader.ReadString();"); return;
-        }
-
-        string typeName = type.ToDisplayString();
-        if (typeName == "System.Guid")
-        {
-            sb.AppendLine($"        Guid {localName} = reader.ReadGuid();");
-            return;
-        }
-        if (typeName == "System.TimeSpan")
-        {
-            sb.AppendLine($"        TimeSpan {localName} = reader.ReadTimeSpan();");
-            return;
-        }
-
-        if (type.TypeKind == TypeKind.Enum)
-        {
-            var underlying = ((INamedTypeSymbol)type).EnumUnderlyingType!;
-            string tmpUnderlying = "tmp_e_" + localName;
-            EmitReadIntoLocal(sb, underlying, tmpUnderlying);
-            sb.AppendLine($"        {type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {localName} = ({type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}){tmpUnderlying};");
-            return;
-        }
-
-        if (type is IArrayTypeSymbol arrayType)
-        {
-            var elemType = arrayType.ElementType;
-            if (elemType.IsValueType && elemType.IsUnmanagedType)
-            {
-                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeUnmanagedArray<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader>(ref reader);");
-            }
-            else
-            {
-                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeArrayWithTracker<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader, TTracker>(ref reader, ref tracker);");
-            }
-            return;
-        }
-
-        if (type is INamedTypeSymbol namedType && namedType.IsGenericType && namedType.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.List<T>")
-        {
-            var elemType = namedType.TypeArguments[0];
-            if (elemType.IsValueType && elemType.IsUnmanagedType)
-            {
-                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeUnmanagedList<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader>(ref reader);");
-            }
-            else
-            {
-                sb.AppendLine($"        var {localName} = ApexPackSerializer.DeserializeListWithTracker<{elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}, TReader, TTracker>(ref reader, ref tracker);");
-            }
-            return;
-        }
-
-        var unannotatedType = type.WithNullableAnnotation(NullableAnnotation.NotAnnotated);
-        string fullType = unannotatedType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-        sb.AppendLine($"        {fullType} {localName};");
-        sb.AppendLine($"        {fullType}.DeserializeWithTracker(ref reader, out {localName}, ref tracker);");
-    }
+    public static readonly DiagnosticDescriptor UnsupportedType = new(
+        "APX013", "Unsupported type", "'{0}' cannot be [ApexPackable] (ref struct)", Category, DiagnosticSeverity.Error, true);
 }

@@ -9,7 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="MemoryPack" Version="1.21.4" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -18,8 +18,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- アンロード可能性テストで collectible な AssemblyLoadContext に読み込むプラグイン。直接は参照しない。 -->
+    <ProjectReference Include="..\ApexPack.Tests.Plugin\ApexPack.Tests.Plugin.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\src\ApexPack.Core\ApexPack.Core.csproj" />
     <ProjectReference Include="..\..\src\ApexPack.Generator\ApexPack.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopyUnloadPlugin" AfterTargets="Build">
+    <MSBuild Projects="..\ApexPack.Tests.Plugin\ApexPack.Tests.Plugin.csproj" Targets="GetTargetPath" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="UnloadPluginAssembly" />
+    </MSBuild>
+    <Copy SourceFiles="@(UnloadPluginAssembly)" DestinationFolder="$(OutDir)plugin" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

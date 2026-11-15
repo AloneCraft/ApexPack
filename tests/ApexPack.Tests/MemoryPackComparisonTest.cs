@@ -108,10 +108,9 @@ public class MemoryPackComparisonTest
         // - 1 byte tag for each bool
         // - 1 byte tag for each nullable / null string
         // ApexPack stores:
-        // - 1 byte object tag
-        // - 2 bytes bitmask (combining all 4 bools + 5 nullables = 9 bits)
+        // - 2 バイトのマスク(非 null の印 1 ビット + bool 4 + Nullable 3 + string? 2 = 10 ビット)。null 用のタグは不要
         // - 4 bytes Id
-        // - 0 bytes for all null/false values!
+        // - null / false のメンバーは 0 バイト
         Assert.True(apexBytes.Length < mpBytes.Length,
             $"ApexPack ({apexBytes.Length} bytes) should be smaller than MemoryPack ({mpBytes.Length} bytes) due to bit-packing!");
 

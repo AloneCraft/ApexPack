@@ -24,12 +24,11 @@ public class BitPackingTest
 
         byte[] bytes = ApexPackSerializer.Serialize(entity);
 
-        // Expected size:
-        // 1 byte (class tag: 1)
-        // 1 byte (bitmask for 8 bit-packable members)
-        // 4 bytes (int Id)
-        // 0 bytes for all null/false fields!
-        // Total = 1 + 1 + 4 = 6 bytes!
+        // 期待サイズ:
+        // マスク 2 バイト(非 null の印 1 ビット + bool 4 + int? 2 + string? 2 = 9 ビット)。印があるので null 用のタグは不要
+        // int Id 4 バイト
+        // null / false のメンバーは 0 バイト
+        // 合計 2 + 4 = 6 バイト
         Assert.Equal(6, bytes.Length);
 
         var deserialized = ApexPackSerializer.Deserialize<BitPackedEntity>(bytes);

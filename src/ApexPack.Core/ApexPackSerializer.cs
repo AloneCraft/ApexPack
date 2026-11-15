@@ -1,78 +1,185 @@
 using System;
 using System.Buffers;
-using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using ApexPack.Buffers;
 
 namespace ApexPack;
 
 /// <summary>
-/// Primary entry point for ApexPack serialization and deserialization.
+/// ApexPack の入口。
 /// </summary>
+/// <remarks>
+/// [ApexPackable] 型は制約付きオーバーロード(仮想呼び出しなし)、それ以外の型(List&lt;int&gt;、string など)は
+/// <see cref="ApexFormatterCache{T}"/> 経由で扱う。どちらも型をキーにした static な表を持たない。
+/// </remarks>
 public static class ApexPackSerializer
 {
-    [ThreadStatic]
-    private static byte[]? t_threadBuffer;
+    // ================= serialize =================
 
-    private const int ThreadBufferSize = 65536;
-
-    /// <summary>
-    /// Serializes a value into a byte array with thread-local buffer fast-path.
-    /// </summary>
+    /// <summary>[ApexPackable] 型を byte 配列にする。固定長型は正確なサイズの配列へ直接書く。</summary>
+    [OverloadResolutionPriority(1)]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static byte[] Serialize<T>(scoped in T value) where T : ISerializePackable<T>
     {
-        var buffer = t_threadBuffer ??= new byte[ThreadBufferSize];
-        var writer = new ApexSpanWriter(buffer);
+        if (T.ApexPreserveReferences)
+        {
+            return SerializeWithReferencesCore(in value);
+        }
+
+        int fixedSize = T.ApexFixedSize;
+        if (fixedSize >= 0)
+        {
+            var result = GC.AllocateUninitializedArray<byte>(fixedSize);
+            if (fixedSize > 0)
+            {
+                T.WriteFixed(ref MemoryMarshal.GetArrayDataReference(result), in value, BitConverter.IsLittleEndian);
+            }
+            return result;
+        }
+
+        return SerializeVariable(in value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static byte[] SerializeVariable<T>(scoped in T value) where T : ISerializePackable<T>
+    {
+        var buffer = ApexThreadBuffer.Rent();
+        var writer = new ApexBufferWriter(buffer);
         try
         {
-            T.Serialize(ref writer, in value);
-            return writer.WrittenSpan.ToArray();
+            var tracker = new NullReferenceTracker();
+            T.SerializeWithTracker(ref writer, in value, ref tracker);
+            return writer.ToArray();
         }
-        catch (InvalidOperationException)
+        finally
         {
-            var expandingWriter = new ApexBufferWriter(ThreadBufferSize * 2);
-            try
-            {
-                T.Serialize(ref expandingWriter, in value);
-                return expandingWriter.ToArray();
-            }
-            finally
-            {
-                expandingWriter.Dispose();
-            }
+            writer.Dispose();
+            ApexThreadBuffer.Return(buffer);
         }
     }
 
-    /// <summary>
-    /// Serializes a value directly into a target Span&lt;byte&gt; (100% zero heap allocation).
-    /// </summary>
+    /// <summary>任意の型(コレクション、文字列、BCL 型など)を byte 配列にする。</summary>
+    public static byte[] Serialize<T>(T value) => ApexFormatterCache<T>.Instance.SerializeToArray(in value);
+
+    /// <summary>[ApexPackable] 型を <paramref name="destination"/> へ書き、書いたバイト数を返す(ヒープ割り当てなし)。</summary>
+    [OverloadResolutionPriority(1)]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int Serialize<T>(Span<byte> destination, scoped in T value) where T : ISerializePackable<T>
     {
         var writer = new ApexSpanWriter(destination);
-        T.Serialize(ref writer, in value);
+        if (T.ApexPreserveReferences)
+        {
+            var active = new ActiveReferenceTracker();
+            try
+            {
+                T.SerializeWithTracker(ref writer, in value, ref active);
+            }
+            finally
+            {
+                active.Dispose();
+            }
+            return writer.BytesWritten;
+        }
+        var tracker = new NullReferenceTracker();
+        T.SerializeWithTracker(ref writer, in value, ref tracker);
         return writer.BytesWritten;
     }
 
-    /// <summary>
-    /// Deserializes a value from a ReadOnlySpan&lt;byte&gt; (zero allocation for structs).
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static T Deserialize<T>(ReadOnlySpan<byte> bytes) where T : ISerializePackable<T>
+    /// <summary>任意の型を <paramref name="destination"/> へ書き、書いたバイト数を返す。</summary>
+    public static int Serialize<T>(Span<byte> destination, T value) => ApexFormatterCache<T>.Instance.SerializeToSpan(destination, in value);
+
+    /// <summary>任意の型を <see cref="IBufferWriter{T}"/> へ直接書く。</summary>
+    public static void Serialize<T>(IBufferWriter<byte> destination, T value) => ApexFormatterCache<T>.Instance.SerializeToBufferWriter(destination, in value);
+
+    /// <summary>任意の型をストリームへ書く。</summary>
+    public static async ValueTask SerializeAsync<T>(Stream stream, T value, CancellationToken cancellationToken = default)
     {
-        var reader = new ApexSpanReader(bytes);
-        T.Deserialize(ref reader, out var value);
-        return value;
+        byte[] bytes = Serialize(value);
+        await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Serializes an object graph with circular references and shared instance tracking enabled.
-    /// </summary>
-    public static byte[] SerializeWithReferences<T>(scoped in T value) where T : ISerializePackable<T>
+    // ================= deserialize =================
+
+    /// <summary>任意の型を復元する(信頼済み入力)。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T Deserialize<T>(ReadOnlySpan<byte> bytes)
     {
-        var writer = new ApexBufferWriter(256);
+        // 固定長型は仮想呼び出しを通さずに読む(条件は Tier1 で定数になる)
+        if (ApexRootInfo<T>.FixedSize >= 0)
+        {
+            if (bytes.Length < ApexRootInfo<T>.FixedSize) ApexSpanReader.ThrowUnexpectedEndOfBuffer();
+            if (ApexRootInfo<T>.IsRawLayout) return Unsafe.ReadUnaligned<T>(ref MemoryMarshal.GetReference(bytes));
+            // static readonly の中身は正確な型が分かるので、JIT が脱仮想化してインライン展開できる
+            return ApexFormatterCache<T>.Instance.ReadFixedRoot(in MemoryMarshal.GetReference(bytes), BitConverter.IsLittleEndian);
+        }
+        return ApexFormatterCache<T>.Instance.Deserialize(bytes, out _);
+    }
+
+    /// <summary>任意の型を復元し、消費したバイト数を返す。</summary>
+    public static T Deserialize<T>(ReadOnlySpan<byte> bytes, out int consumed) => ApexFormatterCache<T>.Instance.Deserialize(bytes, out consumed);
+
+    /// <summary>複数セグメントの入力から復元する。</summary>
+    public static T Deserialize<T>(in ReadOnlySequence<byte> bytes)
+    {
+        if (bytes.IsSingleSegment)
+        {
+            return Deserialize<T>(bytes.FirstSpan);
+        }
+
+        int length = checked((int)bytes.Length);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+        try
+        {
+            bytes.CopyTo(rented);
+            return Deserialize<T>(rented.AsSpan(0, length));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>ストリームの残りすべてを読んで復元する。</summary>
+    public static async ValueTask<T> DeserializeAsync<T>(Stream stream, CancellationToken cancellationToken = default)
+    {
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+        return Deserialize<T>(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));
+    }
+
+    /// <summary>信頼できない入力を上限付きで復元する(再帰爆弾・増幅攻撃・<see cref="Type"/> 名の無断解決を拒否)。</summary>
+    public static T DeserializeSafe<T>(ReadOnlySpan<byte> bytes, in ApexSecurityOptions options)
+        => ApexFormatterCache<T>.Instance.DeserializeSafe(bytes, in options, typeResolver: null);
+
+    /// <summary>呼び出し単位の設定で復元する。</summary>
+    public static T Deserialize<T>(ReadOnlySpan<byte> bytes, ApexSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.Security is { } security)
+        {
+            return ApexFormatterCache<T>.Instance.DeserializeSafe(bytes, in security, options.TypeResolver);
+        }
+        if (options.TypeResolver is { } resolver)
+        {
+            return ApexFormatterCache<T>.Instance.DeserializeResolving(bytes, resolver);
+        }
+        return Deserialize<T>(bytes);
+    }
+
+    // ================= reference tracking =================
+
+    /// <summary>循環参照と共有インスタンスを保ったまま書く。</summary>
+    public static byte[] SerializeWithReferences<T>(scoped in T value) where T : ISerializePackable<T>
+        => SerializeWithReferencesCore(in value);
+
+    private static byte[] SerializeWithReferencesCore<T>(scoped in T value) where T : ISerializePackable<T>
+    {
+        var buffer = ApexThreadBuffer.Rent();
+        var writer = new ApexBufferWriter(buffer);
         var tracker = new ActiveReferenceTracker();
         try
         {
@@ -83,19 +190,19 @@ public static class ApexPackSerializer
         {
             tracker.Dispose();
             writer.Dispose();
+            ApexThreadBuffer.Return(buffer);
         }
     }
 
-    /// <summary>
-    /// Deserializes an object graph with circular references and shared instance tracking enabled.
-    /// </summary>
+    /// <summary><see cref="SerializeWithReferences{T}"/> の出力を復元する。</summary>
     public static T DeserializeWithReferences<T>(ReadOnlySpan<byte> bytes) where T : ISerializePackable<T>
     {
         var reader = new ApexSpanReader(bytes);
         var tracker = new ActiveReferenceTracker();
+        var guard = new TrustedSecurityGuard();
         try
         {
-            T.DeserializeWithTracker(ref reader, out var value, ref tracker);
+            T.DeserializeGuarded(ref reader, out var value, ref tracker, ref guard);
             return value;
         }
         finally
@@ -104,172 +211,60 @@ public static class ApexPackSerializer
         }
     }
 
-    /// <summary>
-    /// Serializes an array of packable items with reference tracking support.
-    /// </summary>
-    public static void SerializeArrayWithTracker<T, TWriter, TTracker>(ref TWriter writer, T[]? items, ref TTracker tracker)
-        where T : ISerializePackable<T>
-        where TWriter : IApexBufferWriter, allows ref struct
-        where TTracker : IReferenceTracker, allows ref struct
-    {
-        if (items is null)
-        {
-            writer.WriteInt32(-1);
-            return;
-        }
+    // ================= arrays =================
 
-        int count = items.Length;
-        writer.WriteInt32(count);
-        for (int i = 0; i < count; i++)
+    /// <summary>[ApexPackable] 型の配列を書く(要素は null 可)。</summary>
+    public static byte[] SerializeArray<T>(T[]? items) where T : ISerializePackable<T>
+    {
+        var buffer = ApexThreadBuffer.Rent();
+        var writer = new ApexBufferWriter(buffer);
+        try
         {
-            T.SerializeWithTracker(ref writer, in items[i], ref tracker);
+            var tracker = new NullReferenceTracker();
+            ArrayFormatter<T, PackableFormatter<T>>.Write(ref writer, in items, ref tracker);
+            return writer.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+            ApexThreadBuffer.Return(buffer);
         }
     }
 
-    /// <summary>
-    /// Deserializes an array of packable items with reference tracking support.
-    /// </summary>
-    public static T[]? DeserializeArrayWithTracker<T, TReader, TTracker>(ref TReader reader, ref TTracker tracker)
-        where T : ISerializePackable<T>
-        where TReader : IApexBufferReader, allows ref struct
-        where TTracker : IReferenceTracker, allows ref struct
+    /// <summary><see cref="SerializeArray{T}"/> の出力を復元する。</summary>
+    public static T[]? DeserializeArray<T>(ReadOnlySpan<byte> bytes) where T : ISerializePackable<T>
     {
-        int count = reader.ReadInt32();
-        if (count == -1) return null;
-        if (count == 0) return Array.Empty<T>();
-
-        var array = new T[count];
-        for (int i = 0; i < count; i++)
-        {
-            T.DeserializeWithTracker(ref reader, out array[i], ref tracker);
-        }
-        return array;
+        var reader = new ApexSpanReader(bytes);
+        var tracker = new NullReferenceTracker();
+        var guard = new TrustedSecurityGuard();
+        return ArrayFormatter<T, PackableFormatter<T>>.Read(ref reader, ref tracker, ref guard);
     }
 
-    /// <summary>
-    /// Serializes a generic List&lt;T&gt; of packable items with reference tracking support.
-    /// </summary>
-    public static void SerializeListWithTracker<T, TWriter, TTracker>(ref TWriter writer, List<T>? items, ref TTracker tracker)
-        where T : ISerializePackable<T>
-        where TWriter : IApexBufferWriter, allows ref struct
-        where TTracker : IReferenceTracker, allows ref struct
+    /// <summary>スカラー要素の配列を書く(LE 機では一括コピー)。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static byte[] SerializeUnmanagedArray<T>(T[]? items) where T : unmanaged
     {
-        if (items is null)
-        {
-            writer.WriteInt32(-1);
-            return;
-        }
+        if (items is null) return new byte[] { 0 };
 
-        int count = items.Count;
-        writer.WriteInt32(count);
-        for (int i = 0; i < count; i++)
-        {
-            var item = items[i];
-            T.SerializeWithTracker(ref writer, in item, ref tracker);
-        }
+        int body = checked(items.Length * ApexWire.SizeOf<T>());
+        uint header = (uint)items.Length + 1;
+        int headerSize = ApexWire.CompactSize(header);
+        var result = GC.AllocateUninitializedArray<byte>(headerSize + body);
+        ref byte dest = ref MemoryMarshal.GetArrayDataReference(result);
+        ApexWire.WriteCompact(ref dest, header, BitConverter.IsLittleEndian);
+        var writer = new ApexSpanWriter(result.AsSpan(headerSize));
+        var tracker = new NullReferenceTracker();
+        ApexSequence.WriteElements<ApexSpanWriter, NullReferenceTracker, T, ScalarFormatter<T>>(ref writer, items, ref tracker);
+        return result;
     }
 
-    /// <summary>
-    /// Deserializes a generic List&lt;T&gt; of packable items with reference tracking support.
-    /// </summary>
-    public static List<T>? DeserializeListWithTracker<T, TReader, TTracker>(ref TReader reader, ref TTracker tracker)
-        where T : ISerializePackable<T>
-        where TReader : IApexBufferReader, allows ref struct
-        where TTracker : IReferenceTracker, allows ref struct
+    /// <summary><see cref="SerializeUnmanagedArray{T}(T[])"/> の出力を復元する。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T[]? DeserializeUnmanagedArray<T>(ReadOnlySpan<byte> bytes) where T : unmanaged
     {
-        int count = reader.ReadInt32();
-        if (count == -1) return null;
-        if (count == 0) return new List<T>(0);
-
-        var list = new List<T>(count);
-        for (int i = 0; i < count; i++)
-        {
-            T.DeserializeWithTracker(ref reader, out var item, ref tracker);
-            list.Add(item);
-        }
-        return list;
-    }
-
-    /// <summary>
-    /// Serializes an unmanaged array using direct fast block copy.
-    /// </summary>
-    public static void SerializeUnmanagedArray<T, TWriter>(ref TWriter writer, T[]? items)
-        where T : unmanaged
-        where TWriter : IApexBufferWriter, allows ref struct
-    {
-        if (items is null)
-        {
-            writer.WriteInt32(-1);
-            return;
-        }
-
-        int count = items.Length;
-        writer.WriteInt32(count);
-        if (count > 0)
-        {
-            var byteSpan = MemoryMarshal.AsBytes(items.AsSpan());
-            writer.WriteRaw(byteSpan);
-        }
-    }
-
-    /// <summary>
-    /// Deserializes an unmanaged array using direct fast block copy.
-    /// </summary>
-    public static T[]? DeserializeUnmanagedArray<T, TReader>(ref TReader reader)
-        where T : unmanaged
-        where TReader : IApexBufferReader, allows ref struct
-    {
-        int count = reader.ReadInt32();
-        if (count == -1) return null;
-        if (count == 0) return Array.Empty<T>();
-
-        var array = new T[count];
-        var byteSpan = MemoryMarshal.AsBytes(array.AsSpan());
-        var sourceSpan = reader.ReadRaw(byteSpan.Length);
-        sourceSpan.CopyTo(byteSpan);
-        return array;
-    }
-
-    /// <summary>
-    /// Serializes an unmanaged List&lt;T&gt; using direct fast block copy.
-    /// </summary>
-    public static void SerializeUnmanagedList<T, TWriter>(ref TWriter writer, List<T>? items)
-        where T : unmanaged
-        where TWriter : IApexBufferWriter, allows ref struct
-    {
-        if (items is null)
-        {
-            writer.WriteInt32(-1);
-            return;
-        }
-
-        int count = items.Count;
-        writer.WriteInt32(count);
-        if (count > 0)
-        {
-            var span = CollectionsMarshal.AsSpan(items);
-            var byteSpan = MemoryMarshal.AsBytes(span);
-            writer.WriteRaw(byteSpan);
-        }
-    }
-
-    /// <summary>
-    /// Deserializes an unmanaged List&lt;T&gt; using direct fast block copy.
-    /// </summary>
-    public static List<T>? DeserializeUnmanagedList<T, TReader>(ref TReader reader)
-        where T : unmanaged
-        where TReader : IApexBufferReader, allows ref struct
-    {
-        int count = reader.ReadInt32();
-        if (count == -1) return null;
-        if (count == 0) return new List<T>(0);
-
-        var list = new List<T>(count);
-        CollectionsMarshal.SetCount(list, count);
-        var span = CollectionsMarshal.AsSpan(list);
-        var byteSpan = MemoryMarshal.AsBytes(span);
-        var sourceSpan = reader.ReadRaw(byteSpan.Length);
-        sourceSpan.CopyTo(byteSpan);
-        return list;
+        var reader = new ApexSpanReader(bytes);
+        var tracker = new NullReferenceTracker();
+        var guard = new TrustedSecurityGuard();
+        return ArrayFormatter<T, ScalarFormatter<T>>.Read(ref reader, ref tracker, ref guard);
     }
 }

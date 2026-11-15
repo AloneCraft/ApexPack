@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- アンロード可能性テスト用。テストからは collectible な AssemblyLoadContext に読み込むため、直接参照しない。 -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ApexPack.Core\ApexPack.Core.csproj" Private="false" />
+    <ProjectReference Include="..\..\src\ApexPack.Generator\ApexPack.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

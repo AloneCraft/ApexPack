@@ -1,66 +1,46 @@
 using System;
-using System.Runtime.CompilerServices;
 
 namespace ApexPack.Buffers;
 
 /// <summary>
-/// High-throughput zero-allocation buffer writer contract.
+/// 書き込み先バッファの最小契約。値の符号化は <see cref="ApexBufferExtensions"/> に集約し、各実装は領域確保だけを持つ。
 /// </summary>
+/// <remarks>
+/// ワイヤ形式はリトルエンディアン固定。<see cref="IsHostLittleEndian"/> は JIT 時定数として畳み込まれ、
+/// リトルエンディアン機ではバイト反転経路がコードごと消える。
+/// </remarks>
 public interface IApexBufferWriter
 {
-    void WriteByte(byte value);
-    void WriteSByte(sbyte value);
-    void WriteChar(char value);
-    void WriteInt16(short value);
-    void WriteUInt16(ushort value);
-    void WriteInt32(int value);
-    void WriteUInt32(uint value);
-    void WriteInt64(long value);
-    void WriteUInt64(ulong value);
-    void WriteSingle(float value);
-    void WriteDouble(double value);
-    void WriteBoolean(bool value);
-    void WriteGuid(Guid value);
-    void WriteDateTime(DateTime value);
-    void WriteTimeSpan(TimeSpan value);
-    void WriteDecimal(decimal value);
-    void WriteRaw(ReadOnlySpan<byte> source);
-    void WriteString(string? value);
-    void WriteUnmanaged<T>(in T value) where T : unmanaged;
+    /// <summary>ネイティブのメモリ表現がワイヤ形式(LE)と一致するなら true。</summary>
+    static abstract bool IsHostLittleEndian { get; }
 
-    void WriteBitmask8(byte mask);
-    void WriteBitmask16(ushort mask);
-    void WriteBitmask32(uint mask);
-    void WriteBitmask64(ulong mask);
+    /// <summary>これまでに確定したバイト数。</summary>
+    int BytesWritten { get; }
+
+    /// <summary><paramref name="size"/> バイトを確保して書き込み位置を進め、その先頭を返す。</summary>
+    ref byte GetSpanRef(int size);
+
+    /// <summary>最大 <paramref name="maxSize"/> バイトを確保するが位置は進めない。続けて <see cref="Advance"/> で実際の長さを確定する。</summary>
+    ref byte Reserve(int maxSize);
+
+    /// <summary>直前の <see cref="Reserve"/> で確保した領域のうち <paramref name="count"/> バイトを確定する。</summary>
+    void Advance(int count);
 }
 
 /// <summary>
-/// High-throughput zero-allocation buffer reader contract.
+/// 読み取り元バッファの最小契約。値の復号は <see cref="ApexBufferExtensions"/> に集約する。
 /// </summary>
 public interface IApexBufferReader
 {
-    byte ReadByte();
-    sbyte ReadSByte();
-    char ReadChar();
-    short ReadInt16();
-    ushort ReadUInt16();
-    int ReadInt32();
-    uint ReadUInt32();
-    long ReadInt64();
-    ulong ReadUInt64();
-    float ReadSingle();
-    double ReadDouble();
-    bool ReadBoolean();
-    Guid ReadGuid();
-    DateTime ReadDateTime();
-    TimeSpan ReadTimeSpan();
-    decimal ReadDecimal();
-    ReadOnlySpan<byte> ReadRaw(int length);
-    string? ReadString();
-    T ReadUnmanaged<T>() where T : unmanaged;
+    /// <summary>ネイティブのメモリ表現がワイヤ形式(LE)と一致するなら true。</summary>
+    static abstract bool IsHostLittleEndian { get; }
 
-    byte ReadBitmask8();
-    ushort ReadBitmask16();
-    uint ReadBitmask32();
-    ulong ReadBitmask64();
+    int Consumed { get; }
+    int Remaining { get; }
+
+    /// <summary><paramref name="size"/> バイトの存在を検査して読み取り位置を進め、その先頭を返す。</summary>
+    ref readonly byte GetSpanRef(int size);
+
+    /// <summary>位置を進めずに次の 1 バイトを返す。</summary>
+    byte PeekByte();
 }

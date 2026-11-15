@@ -6,17 +6,30 @@ using System.Runtime.InteropServices;
 namespace ApexPack.Buffers;
 
 /// <summary>
-/// An auto-expanding buffer writer backed by rented arrays.
+/// 自動伸長する writer。初期バッファを外部から受け取れ(スレッドローカルの再利用)、
+/// 不足したら <see cref="ArrayPool{T}"/> から倍々に借りる。借りた配列は <see cref="Dispose"/> で返す。
 /// </summary>
-public struct ApexBufferWriter : IApexBufferWriter, IDisposable
+public ref struct ApexBufferWriter : IApexBufferWriter, IDisposable
 {
     private byte[] _buffer;
     private int _written;
+    private bool _rented;
+
+    public static bool IsHostLittleEndian => BitConverter.IsLittleEndian;
 
     public ApexBufferWriter(int initialCapacity = 256)
     {
         _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, 64));
         _written = 0;
+        _rented = true;
+    }
+
+    /// <summary>呼び出し側が所有する初期バッファで開始する。この配列はプールへ返さない。</summary>
+    public ApexBufferWriter(byte[] initialBuffer)
+    {
+        _buffer = initialBuffer;
+        _written = 0;
+        _rented = false;
     }
 
     public readonly int BytesWritten => _written;
@@ -25,134 +38,125 @@ public struct ApexBufferWriter : IApexBufferWriter, IDisposable
 
     public readonly byte[] ToArray()
     {
-        var array = new byte[_written];
-        _buffer.AsSpan(0, _written).CopyTo(array);
+        if (_written == 0) return Array.Empty<byte>();
+        var array = GC.AllocateUninitializedArray<byte>(_written);
+        Unsafe.CopyBlockUnaligned(ref MemoryMarshal.GetArrayDataReference(array), ref MemoryMarshal.GetArrayDataReference(_buffer), (uint)_written);
         return array;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private Span<byte> GetSpan(int size)
+    public ref byte GetSpanRef(int size)
     {
-        int required = _written + size;
-        if ((uint)required > (uint)_buffer.Length)
-        {
-            Grow(required);
-        }
-        var target = _buffer.AsSpan(_written, size);
+        ref byte p = ref Reserve(size);
         _written += size;
-        return target;
+        return ref p;
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref byte Reserve(int maxSize)
+    {
+        if ((uint)maxSize > (uint)(_buffer.Length - _written))
+        {
+            Grow(maxSize);
+        }
+        return ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buffer), _written);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Advance(int count) => _written += count;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void Grow(int required)
+    private void Grow(int size)
     {
-        int newCapacity = Math.Max(_buffer.Length * 2, required);
+        long required = (long)_written + (uint)size;
+        if (size < 0 || required > Array.MaxLength)
+        {
+            throw new InvalidOperationException($"Serialized payload exceeds the maximum array length ({required} bytes).");
+        }
+
+        int newCapacity = (int)Math.Min(Math.Max((long)_buffer.Length * 2, required), Array.MaxLength);
         var newBuffer = ArrayPool<byte>.Shared.Rent(newCapacity);
         _buffer.AsSpan(0, _written).CopyTo(newBuffer);
-        ArrayPool<byte>.Shared.Return(_buffer);
+        if (_rented)
+        {
+            ArrayPool<byte>.Shared.Return(_buffer);
+        }
         _buffer = newBuffer;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteByte(byte value) => GetSpan(1)[0] = value;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteSByte(sbyte value) => GetSpan(1)[0] = (byte)value;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteChar(char value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(char))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteInt16(short value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(short))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteUInt16(ushort value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(ushort))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteInt32(int value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(int))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteUInt32(uint value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(uint))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteInt64(long value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(long))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteUInt64(ulong value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(ulong))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteSingle(float value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(float))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteDouble(double value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(sizeof(double))), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteBoolean(bool value) => WriteByte(value ? (byte)1 : (byte)0);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteGuid(Guid value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<Guid>())), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteDateTime(DateTime value) => WriteInt64(value.ToBinary());
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteTimeSpan(TimeSpan value) => WriteInt64(value.Ticks);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteDecimal(decimal value) => Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<decimal>())), value);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteRaw(ReadOnlySpan<byte> source)
-    {
-        if (source.IsEmpty) return;
-        source.CopyTo(GetSpan(source.Length));
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteBitmask8(byte mask) => WriteByte(mask);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteBitmask16(ushort mask) => WriteUInt16(mask);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteBitmask32(uint mask) => WriteUInt32(mask);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteBitmask64(ulong mask) => WriteUInt64(mask);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteUnmanaged<T>(in T value) where T : unmanaged
-    {
-        Unsafe.WriteUnaligned(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<T>())), value);
-    }
-
-    /// <summary>
-    /// Writes a System.String directly as UTF-16 in-memory memory blit (zero transcoding overhead).
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void WriteString(string? value)
-    {
-        if (value is null)
-        {
-            WriteInt32(-1);
-            return;
-        }
-
-        int charLength = value.Length;
-        WriteInt32(charLength);
-        if (charLength > 0)
-        {
-            ReadOnlySpan<byte> byteSpan = MemoryMarshal.AsBytes(value.AsSpan());
-            WriteRaw(byteSpan);
-        }
+        _rented = true;
     }
 
     public void Dispose()
     {
-        if (_buffer != null)
+        if (_rented && _buffer is not null)
         {
             ArrayPool<byte>.Shared.Return(_buffer);
-            _buffer = null!;
         }
+        _buffer = null!;
+        _rented = false;
+    }
+}
+
+/// <summary>
+/// <see cref="IBufferWriter{T}"/> へ直接書き込む writer。終了時に <see cref="Flush"/> を呼ぶこと。
+/// </summary>
+public ref struct ApexBufferWriterAdapter<TBufferWriter> : IApexBufferWriter
+    where TBufferWriter : IBufferWriter<byte>
+{
+    private readonly TBufferWriter _target;
+    private Span<byte> _current;
+    private int _pending;
+    private int _committed;
+
+    public static bool IsHostLittleEndian => BitConverter.IsLittleEndian;
+
+    public ApexBufferWriterAdapter(TBufferWriter target)
+    {
+        _target = target;
+        _current = default;
+        _pending = 0;
+        _committed = 0;
+    }
+
+    public readonly int BytesWritten => _committed + _pending;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref byte GetSpanRef(int size)
+    {
+        ref byte p = ref Reserve(size);
+        _pending += size;
+        return ref p;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref byte Reserve(int maxSize)
+    {
+        if ((uint)maxSize > (uint)(_current.Length - _pending))
+        {
+            Acquire(maxSize);
+        }
+        return ref Unsafe.Add(ref MemoryMarshal.GetReference(_current), _pending);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Advance(int count) => _pending += count;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Acquire(int size)
+    {
+        if (size < 0) throw new ArgumentOutOfRangeException(nameof(size));
+        Flush();
+        _current = _target.GetSpan(Math.Max(size, 4096));
+    }
+
+    /// <summary>書き込み済みの領域を下位の <see cref="IBufferWriter{T}"/> へ確定する。</summary>
+    public void Flush()
+    {
+        if (_pending > 0)
+        {
+            _target.Advance(_pending);
+            _committed += _pending;
+        }
+        _pending = 0;
+        _current = default;
     }
 }

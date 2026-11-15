@@ -152,7 +152,7 @@ public class MemoryPackExactRepoTest
         string? mpRestored = MemoryPackSerializer.Deserialize<string>(mpBin);
         Assert.Equal(text, mpRestored);
 
-        // ApexPack (native UTF-16 in-memory blit)
+        // ApexPack(Latin1 に収まらない文字を含むので UTF-16LE で書かれる)
         byte[] apexBin = ApexPackSerializer.Serialize(new Person { Name = text });
         var apexRestored = ApexPackSerializer.Deserialize<Person>(apexBin);
         Assert.Equal(text, apexRestored.Name);

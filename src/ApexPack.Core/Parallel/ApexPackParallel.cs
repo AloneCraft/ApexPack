@@ -1,55 +1,43 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
-using System.Threading.Tasks;
 using ApexPack.Buffers;
 
 namespace ApexPack.Parallel;
 
 /// <summary>
-/// Multi-core parallel chunking serialization and deserialization engine.
-/// Scales linearly across CPU cores for large datasets.
+/// 大きなコレクションをチャンクに分けて CPU コアごとに並列に読み書きする。
 /// </summary>
+/// <remarks>
+/// 形式: "APXP"(u32 LE) / 総件数(u32 LE) / チャンク数(u32 LE) / 各チャンクの開始位置(u32 LE × チャンク数) / 各チャンク本体。
+/// チャンク本体は要素を null 可の位置として連結したもの。
+/// </remarks>
 public static class ApexPackParallel
 {
-    private const uint MagicParallelHeader = 0x50585041; // "APXP" in little-endian
+    private const uint MagicParallelHeader = 0x50585041; // "APXP"
 
-    /// <summary>
-    /// Serializes a collection in parallel across CPU cores using chunking.
-    /// </summary>
     public static byte[] Serialize<T>(IReadOnlyList<T> items, int chunkSize = 4096)
         where T : ISerializePackable<T>
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chunkSize);
         int totalCount = items.Count;
-        if (totalCount == 0)
-        {
-            var emptyWriter = new ApexBufferWriter(32);
-            emptyWriter.WriteUInt32(MagicParallelHeader);
-            emptyWriter.WriteInt32(0);
-            emptyWriter.WriteInt32(0);
-            return emptyWriter.ToArray();
-        }
-
-        int chunkCount = (totalCount + chunkSize - 1) / chunkSize;
-        var chunkBuffers = new byte[chunkCount][];
-        var chunkLengths = new int[chunkCount];
+        int chunkCount = totalCount == 0 ? 0 : (totalCount + chunkSize - 1) / chunkSize;
+        var chunks = new byte[chunkCount][];
 
         System.Threading.Tasks.Parallel.For(0, chunkCount, chunkIndex =>
         {
             int start = chunkIndex * chunkSize;
             int count = Math.Min(chunkSize, totalCount - start);
-
             var writer = new ApexBufferWriter(count * 32);
             try
             {
+                var tracker = new NullReferenceTracker();
                 for (int i = 0; i < count; i++)
                 {
                     var item = items[start + i];
-                    T.Serialize(ref writer, in item);
+                    T.SerializeWithTracker(ref writer, in item, ref tracker);
                 }
-                chunkBuffers[chunkIndex] = writer.ToArray();
-                chunkLengths[chunkIndex] = writer.BytesWritten;
+                chunks[chunkIndex] = writer.ToArray();
             }
             finally
             {
@@ -57,88 +45,68 @@ public static class ApexPackParallel
             }
         });
 
-        // Compute offsets
-        int headerSize = sizeof(uint) + sizeof(int) + sizeof(int) + (chunkCount * sizeof(int));
-        int totalPayloadSize = 0;
-        for (int i = 0; i < chunkCount; i++)
+        int headerSize = checked(12 + chunkCount * 4);
+        long total = headerSize;
+        foreach (var chunk in chunks) total += chunk.Length;
+        var result = GC.AllocateUninitializedArray<byte>(checked((int)total));
+
+        var header = new ApexSpanWriter(result);
+        header.WriteUInt32(MagicParallelHeader);
+        header.WriteInt32(totalCount);
+        header.WriteInt32(chunkCount);
+        int offset = headerSize;
+        foreach (var chunk in chunks)
         {
-            totalPayloadSize += chunkLengths[i];
+            header.WriteInt32(offset);
+            chunk.CopyTo(result.AsSpan(offset));
+            offset += chunk.Length;
         }
-
-        byte[] finalBuffer = new byte[headerSize + totalPayloadSize];
-        var span = finalBuffer.AsSpan();
-
-        // Write header
-        var headerWriter = new ApexSpanWriter(span);
-        headerWriter.WriteUInt32(MagicParallelHeader);
-        headerWriter.WriteInt32(totalCount);
-        headerWriter.WriteInt32(chunkCount);
-
-        int currentOffset = headerSize;
-        for (int i = 0; i < chunkCount; i++)
-        {
-            headerWriter.WriteInt32(currentOffset);
-            currentOffset += chunkLengths[i];
-        }
-
-        // Scatter-gather chunk copying
-        currentOffset = headerSize;
-        for (int i = 0; i < chunkCount; i++)
-        {
-            chunkBuffers[i].AsSpan(0, chunkLengths[i]).CopyTo(span.Slice(currentOffset, chunkLengths[i]));
-            currentOffset += chunkLengths[i];
-        }
-
-        return finalBuffer;
+        return result;
     }
 
-    /// <summary>
-    /// Deserializes a parallel-serialized collection across CPU cores without lock contention.
-    /// </summary>
     public static T[] Deserialize<T>(byte[] bytes, int chunkSize = 4096)
         where T : ISerializePackable<T>
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chunkSize);
         var reader = new ApexSpanReader(bytes);
-        uint magic = reader.ReadUInt32();
-        if (magic != MagicParallelHeader)
+        if (reader.ReadUInt32() != MagicParallelHeader)
         {
             throw new InvalidOperationException("Invalid parallel serialized data stream.");
         }
 
         int totalCount = reader.ReadInt32();
         int chunkCount = reader.ReadInt32();
-
-        if (totalCount == 0 || chunkCount == 0)
+        if (totalCount < 0 || chunkCount < 0 || chunkCount > reader.Remaining / 4
+            || (long)chunkCount * chunkSize < totalCount || (chunkCount > 0 && (long)(chunkCount - 1) * chunkSize >= totalCount))
         {
-            return Array.Empty<T>();
+            ApexThrowHelper.ThrowInvalidLength(totalCount);
         }
+        if (totalCount == 0) return Array.Empty<T>();
 
-        var offsets = new int[chunkCount];
+        var offsets = new int[chunkCount + 1];
         for (int i = 0; i < chunkCount; i++)
         {
             offsets[i] = reader.ReadInt32();
         }
+        offsets[chunkCount] = bytes.Length;
+        for (int i = 0; i < chunkCount; i++)
+        {
+            if (offsets[i] < reader.Consumed || offsets[i] > offsets[i + 1]) ApexThrowHelper.ThrowInvalidLength(offsets[i]);
+        }
 
         var result = new T[totalCount];
-
         System.Threading.Tasks.Parallel.For(0, chunkCount, chunkIndex =>
         {
             int startItem = chunkIndex * chunkSize;
             int count = Math.Min(chunkSize, totalCount - startItem);
-
-            int startOffset = offsets[chunkIndex];
-            int nextOffset = (chunkIndex == chunkCount - 1) ? bytes.Length : offsets[chunkIndex + 1];
-            int chunkLength = nextOffset - startOffset;
-
-            var chunkSlice = bytes.AsSpan().Slice(startOffset, chunkLength);
-            var chunkReader = new ApexSpanReader(chunkSlice);
-
+            var chunkReader = new ApexSpanReader(bytes.AsSpan(offsets[chunkIndex], offsets[chunkIndex + 1] - offsets[chunkIndex]));
+            var tracker = new NullReferenceTracker();
+            var guard = new TrustedSecurityGuard();
             for (int i = 0; i < count; i++)
             {
-                T.Deserialize(ref chunkReader, out result[startItem + i]);
+                T.DeserializeGuarded(ref chunkReader, out result[startItem + i], ref tracker, ref guard);
             }
         });
-
         return result;
     }
 }

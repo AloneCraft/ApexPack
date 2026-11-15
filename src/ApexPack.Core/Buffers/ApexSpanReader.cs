@@ -5,13 +5,14 @@ using System.Runtime.InteropServices;
 namespace ApexPack.Buffers;
 
 /// <summary>
-/// High-performance ref struct reader operating directly on a ReadOnlySpan&lt;byte&gt;.
-/// Completely zero heap allocation.
+/// <see cref="ReadOnlySpan{T}"/> から読む reader。範囲外は <see cref="InvalidOperationException"/>。
 /// </summary>
 public ref struct ApexSpanReader : IApexBufferReader
 {
     private readonly ReadOnlySpan<byte> _span;
     private int _consumed;
+
+    public static bool IsHostLittleEndian => BitConverter.IsLittleEndian;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ApexSpanReader(ReadOnlySpan<byte> source)
@@ -24,105 +25,51 @@ public ref struct ApexSpanReader : IApexBufferReader
     public readonly int Remaining => _span.Length - _consumed;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ReadOnlySpan<byte> GetSpan(int size)
+    public ref readonly byte GetSpanRef(int size)
     {
-        if ((uint)(_consumed + size) > (uint)_span.Length)
+        if ((uint)size > (uint)(_span.Length - _consumed))
         {
             ThrowUnexpectedEndOfBuffer();
         }
-        var slice = _span.Slice(_consumed, size);
+        ref readonly byte p = ref Unsafe.Add(ref MemoryMarshal.GetReference(_span), _consumed);
         _consumed += size;
-        return slice;
+        return ref p;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly byte PeekByte()
+    {
+        if ((uint)_consumed >= (uint)_span.Length)
+        {
+            ThrowUnexpectedEndOfBuffer();
+        }
+        return Unsafe.Add(ref MemoryMarshal.GetReference(_span), _consumed);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowUnexpectedEndOfBuffer()
+    internal static void ThrowUnexpectedEndOfBuffer()
     {
         throw new InvalidOperationException("Unexpected end of buffer while reading.");
     }
+}
+
+/// <summary>
+/// <see cref="ApexBigEndianSimWriter"/> の出力を読む reader(反転経路の検証用)。
+/// </summary>
+public ref struct ApexBigEndianSimReader : IApexBufferReader
+{
+    private ApexSpanReader _inner;
+
+    public static bool IsHostLittleEndian => false;
+
+    public ApexBigEndianSimReader(ReadOnlySpan<byte> source) => _inner = new ApexSpanReader(source);
+
+    public readonly int Consumed => _inner.Consumed;
+    public readonly int Remaining => _inner.Remaining;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public byte ReadByte() => GetSpan(1)[0];
+    public ref readonly byte GetSpanRef(int size) => ref _inner.GetSpanRef(size);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public sbyte ReadSByte() => (sbyte)GetSpan(1)[0];
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public char ReadChar() => Unsafe.ReadUnaligned<char>(ref MemoryMarshal.GetReference(GetSpan(sizeof(char))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public short ReadInt16() => Unsafe.ReadUnaligned<short>(ref MemoryMarshal.GetReference(GetSpan(sizeof(short))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ushort ReadUInt16() => Unsafe.ReadUnaligned<ushort>(ref MemoryMarshal.GetReference(GetSpan(sizeof(ushort))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int ReadInt32() => Unsafe.ReadUnaligned<int>(ref MemoryMarshal.GetReference(GetSpan(sizeof(int))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public uint ReadUInt32() => Unsafe.ReadUnaligned<uint>(ref MemoryMarshal.GetReference(GetSpan(sizeof(uint))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public long ReadInt64() => Unsafe.ReadUnaligned<long>(ref MemoryMarshal.GetReference(GetSpan(sizeof(long))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ulong ReadUInt64() => Unsafe.ReadUnaligned<ulong>(ref MemoryMarshal.GetReference(GetSpan(sizeof(ulong))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public float ReadSingle() => Unsafe.ReadUnaligned<float>(ref MemoryMarshal.GetReference(GetSpan(sizeof(float))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public double ReadDouble() => Unsafe.ReadUnaligned<double>(ref MemoryMarshal.GetReference(GetSpan(sizeof(double))));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool ReadBoolean() => ReadByte() != 0;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public Guid ReadGuid() => Unsafe.ReadUnaligned<Guid>(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<Guid>())));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public DateTime ReadDateTime() => DateTime.FromBinary(ReadInt64());
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public TimeSpan ReadTimeSpan() => TimeSpan.FromTicks(ReadInt64());
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public decimal ReadDecimal() => Unsafe.ReadUnaligned<decimal>(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<decimal>())));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ReadOnlySpan<byte> ReadRaw(int length) => GetSpan(length);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public byte ReadBitmask8() => ReadByte();
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ushort ReadBitmask16() => ReadUInt16();
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public uint ReadBitmask32() => ReadUInt32();
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ulong ReadBitmask64() => ReadUInt64();
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public T ReadUnmanaged<T>() where T : unmanaged
-    {
-        return Unsafe.ReadUnaligned<T>(ref MemoryMarshal.GetReference(GetSpan(Unsafe.SizeOf<T>())));
-    }
-
-    /// <summary>
-    /// Reads a System.String directly from UTF-16 in-memory memory blit (zero transcoding overhead).
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public string? ReadString()
-    {
-        int charLength = ReadInt32();
-        if (charLength == -1) return null;
-        if (charLength == 0) return string.Empty;
-
-        int byteLength = checked(charLength * sizeof(char));
-        ReadOnlySpan<byte> byteSpan = GetSpan(byteLength);
-        ReadOnlySpan<char> charSpan = MemoryMarshal.Cast<byte, char>(byteSpan);
-        return new string(charSpan);
-    }
+    public readonly byte PeekByte() => _inner.PeekByte();
 }

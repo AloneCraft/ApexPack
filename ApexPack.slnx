@@ -5,8 +5,11 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ApexPack.Tests/ApexPack.Tests.csproj" />
+    <Project Path="tests/ApexPack.Tests.Plugin/ApexPack.Tests.Plugin.csproj" />
   </Folder>
   <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/ApexPack.BenchmarkSuite/ApexPack.BenchmarkSuite.csproj" />
+    <Project Path="benchmarks/ApexPack.BenchmarkGui/ApexPack.BenchmarkGui.csproj" />
     <Project Path="benchmarks/ApexPack.Benchmarks/ApexPack.Benchmarks.csproj" />
   </Folder>
 </Solution>

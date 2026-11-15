@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <LangVersion>13.0</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ApexPack.BenchmarkSuite\ApexPack.BenchmarkSuite.csproj" />
+    <ProjectReference Include="..\..\src\ApexPack.Core\ApexPack.Core.csproj" />
+  </ItemGroup>
+
+</Project>

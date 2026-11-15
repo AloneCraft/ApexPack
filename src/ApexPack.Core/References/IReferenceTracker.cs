@@ -1,12 +1,14 @@
 using System;
 using System.Buffers;
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using ApexPack.Buffers;
 
 namespace ApexPack;
 
 /// <summary>
-/// Abstraction for tracking object references to support circular references and shared instances.
-/// When using <see cref="NullReferenceTracker"/>, all operations are JIT-eliminated with zero overhead.
+/// 循環参照・共有インスタンスの追跡。<see cref="NullReferenceTracker"/> のときは JIT ですべて消える。
+/// ID はワイヤに書かず、新規インスタンスが現れた順に 0, 1, 2... と暗黙に振る。
 /// </summary>
 public interface IReferenceTracker
 {
@@ -18,8 +20,7 @@ public interface IReferenceTracker
 }
 
 /// <summary>
-/// Zero-size struct tracker used for default serialization.
-/// All calls are completely eliminated as dead code by the JIT compiler.
+/// 追跡なし(既定)。すべての呼び出しが JIT のデッドコード除去で消える。
 /// </summary>
 public readonly struct NullReferenceTracker : IReferenceTracker
 {
@@ -49,8 +50,8 @@ public readonly struct NullReferenceTracker : IReferenceTracker
 }
 
 /// <summary>
-/// Active reference tracker for opt-in circular reference support.
-/// Uses a fast identity hash map with rented array buffers.
+/// 参照追跡(オプトイン)。2 のべき乗サイズの同一性ハッシュ表を使う。
+/// 借りた配列は返却前に必ずクリアし、利用者オブジェクトへの参照を共有プールに残さない(アンロード可能性の不変条件)。
 /// </summary>
 public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 {
@@ -66,25 +67,26 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     private int[]? _buckets;
     private Entry[]? _entries;
+    private int _bucketMask;
     private int _count;
     private uint _nextId;
     private object?[]? _idToObject;
 
     public ActiveReferenceTracker()
     {
-        const int initialSize = 17;
-        _buckets = ArrayPool<int>.Shared.Rent(initialSize);
-        Array.Fill(_buckets, -1, 0, initialSize);
-        _entries = ArrayPool<Entry>.Shared.Rent(initialSize);
-        _idToObject = ArrayPool<object?>.Shared.Rent(initialSize);
+        const int initialCapacity = 32;
+        _buckets = ArrayPool<int>.Shared.Rent(initialCapacity);
+        Array.Fill(_buckets, -1, 0, initialCapacity);
+        _entries = ArrayPool<Entry>.Shared.Rent(initialCapacity);
+        _idToObject = ArrayPool<object?>.Shared.Rent(initialCapacity);
+        _bucketMask = initialCapacity - 1;
         _count = 0;
-        _nextId = 1;
+        _nextId = 0;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint NextId() => _nextId++;
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryGetReferenceId(object obj, out uint id)
     {
         if (_buckets == null || _entries == null)
@@ -94,9 +96,7 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
         }
 
         int hashCode = RuntimeHelpers.GetHashCode(obj);
-        int bucket = (hashCode & 0x7FFFFFFF) % 17;
-
-        for (int i = _buckets[bucket]; i >= 0; i = _entries[i].Next)
+        for (int i = _buckets[hashCode & _bucketMask]; i >= 0; i = _entries[i].Next)
         {
             if (_entries[i].HashCode == hashCode && ReferenceEquals(_entries[i].Target, obj))
             {
@@ -116,14 +116,13 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
             this = new ActiveReferenceTracker();
         }
 
-        if (_count >= _entries!.Length)
+        if (_count >= _entries!.Length || _count > _bucketMask)
         {
             Resize();
         }
 
         int hashCode = RuntimeHelpers.GetHashCode(obj);
-        int bucket = (hashCode & 0x7FFFFFFF) % 17;
-
+        int bucket = hashCode & _bucketMask;
         _entries[_count].HashCode = hashCode;
         _entries[_count].Next = _buckets![bucket];
         _entries[_count].Target = obj;
@@ -133,7 +132,7 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
         if (id >= _idToObject!.Length)
         {
-            var newIdMap = ArrayPool<object?>.Shared.Rent((int)id * 2);
+            var newIdMap = ArrayPool<object?>.Shared.Rent((int)Math.Max((long)id * 2, 64));
             Array.Copy(_idToObject, newIdMap, _idToObject.Length);
             ArrayPool<object?>.Shared.Return(_idToObject, clearArray: true);
             _idToObject = newIdMap;
@@ -141,7 +140,6 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
         _idToObject[id] = obj;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryGetObject(uint id, out object? obj)
     {
         if (_idToObject != null && id < _idToObject.Length && _idToObject[id] != null)
@@ -155,11 +153,27 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     private void Resize()
     {
-        int newSize = _count * 2 + 1;
-        var newEntries = ArrayPool<Entry>.Shared.Rent(newSize);
+        int newCapacity = (int)BitOperations.RoundUpToPowerOf2((uint)(_count * 2));
+        var newBuckets = ArrayPool<int>.Shared.Rent(newCapacity);
+        Array.Fill(newBuckets, -1, 0, newCapacity);
+
+        var newEntries = ArrayPool<Entry>.Shared.Rent(newCapacity);
         Array.Copy(_entries!, newEntries, _count);
+
+        int newMask = newCapacity - 1;
+        for (int i = 0; i < _count; i++)
+        {
+            int bucket = newEntries[i].HashCode & newMask;
+            newEntries[i].Next = newBuckets[bucket];
+            newBuckets[bucket] = i;
+        }
+
+        ArrayPool<int>.Shared.Return(_buckets!);
         ArrayPool<Entry>.Shared.Return(_entries!, clearArray: true);
+
+        _buckets = newBuckets;
         _entries = newEntries;
+        _bucketMask = newMask;
     }
 
     public void Dispose()
@@ -179,5 +193,64 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
             ArrayPool<object?>.Shared.Return(_idToObject, clearArray: true);
             _idToObject = null;
         }
+    }
+}
+
+/// <summary>
+/// 参照追跡時のヘッダー。CompactUInt で 0 = null、1 = 新規インスタンス、n ≥ 2 = ID (n − 2) への後方参照。
+/// </summary>
+public static class ApexReferenceHeader
+{
+    public const uint Null = 0;
+    public const uint NewInstance = 1;
+
+    /// <summary>ヘッダーを書く。続けて本体を書くべきなら true。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool Write<TWriter, TTracker>(ref TWriter writer, object? value, ref TTracker tracker)
+        where TWriter : struct, IApexBufferWriter, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+    {
+        if (value is null)
+        {
+            writer.WriteByte(0);
+            return false;
+        }
+        if (tracker.TryGetReferenceId(value, out uint id))
+        {
+            writer.WriteCompactUInt(id + 2);
+            return false;
+        }
+        tracker.Register(value, tracker.NextId());
+        writer.WriteByte(1);
+        return true;
+    }
+
+    /// <summary>
+    /// ヘッダーを読む。新規インスタンスなら true を返し、<paramref name="newId"/> に予約した ID を入れる(本体読み取り後に Register する)。
+    /// null または後方参照なら false で、<paramref name="existing"/> に結果を入れる。
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool Read<TReader, TTracker>(ref TReader reader, ref TTracker tracker, out uint newId, out object? existing)
+        where TReader : struct, IApexBufferReader, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+    {
+        uint header = reader.ReadCompactUInt();
+        if (header == NewInstance)
+        {
+            newId = tracker.NextId();
+            existing = null;
+            return true;
+        }
+        newId = 0;
+        if (header == Null)
+        {
+            existing = null;
+            return false;
+        }
+        if (!tracker.TryGetObject(header - 2, out existing))
+        {
+            ApexThrowHelper.ThrowInvalidBackReference(header - 2);
+        }
+        return false;
     }
 }
