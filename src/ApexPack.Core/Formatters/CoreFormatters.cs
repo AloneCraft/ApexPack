@@ -89,6 +89,8 @@ public readonly struct PackableFormatter<T> : IApexFormatter<T> where T : ISeria
 
     public static int FixedSize => T.ApexFixedSize;
     public static bool IsRawLayout => T.ApexIsRawLayout;
+    public static int RawPrefixSize => T.ApexRawPrefixSize;
+    public static bool ReadsLikeRoot => true;
     /// <summary>
     /// 構造体は本体の最小サイズ。クラスは null(1 バイト)や参照追跡の後方参照があり得るので 1 バイト。
     /// </summary>
@@ -125,6 +127,7 @@ public readonly struct PackableNonNullFormatter<T> : IApexFormatter<T> where T :
 
     public static int FixedSize => T.ApexFixedSize;
     public static bool IsRawLayout => T.ApexIsRawLayout;
+    public static int RawPrefixSize => T.ApexRawPrefixSize;
     /// <summary>
     /// 構造体は本体の最小サイズ。クラスは参照追跡の後方参照(1 バイトから)があり得るので最大 1 バイト(本体が空の型は 0)。
     /// </summary>

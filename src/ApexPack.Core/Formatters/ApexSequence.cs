@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -80,6 +81,12 @@ public static class ApexSequence
             }
             return;
         }
+        if (le && size > 0 && TFormatter.RawPrefixSize == size)
+        {
+            // メモリの先頭はワイヤと同じで、後ろに詰め物がある型(例: (int, int, int))。詰め物を飛ばしてまとめて写す
+            ApexWire.PackStrided(ref dst, ref Unsafe.As<T, byte>(ref MemoryMarshal.GetReference(span)), span.Length, Unsafe.SizeOf<T>(), size);
+            return;
+        }
         for (int i = 0; i < span.Length; i++)
         {
             TFormatter.WriteFixed(ref Unsafe.Add(ref dst, i * size), in span[i], le);
@@ -108,10 +115,24 @@ public static class ApexSequence
                 }
                 return;
             }
+            if (le && size > 0 && TFormatter.RawPrefixSize == size)
+            {
+                ApexWire.UnpackStrided(ref Unsafe.As<T, byte>(ref MemoryMarshal.GetReference(destination)), ref Unsafe.AsRef(in src), destination.Length, Unsafe.SizeOf<T>(), size);
+                return;
+            }
             for (int i = 0; i < destination.Length; i++)
             {
                 destination[i] = TFormatter.ReadFixed(in Unsafe.Add(ref Unsafe.AsRef(in src), i * size), le);
             }
+            return;
+        }
+
+        // 参照型の要素は共有ジェネリックコードになり、要素ごとの呼び出しに実行時の検索が入る。
+        // よく使う組み合わせ(SpanReader・追跡なし・信頼済み)では、型を具体的に書いた生成コードにまとめて読ませる
+        if (!typeof(T).IsValueType && typeof(TReader) == typeof(ApexSpanReader) && typeof(TTracker) == typeof(NullReferenceTracker)
+            && typeof(TGuard) == typeof(TrustedSecurityGuard) && TFormatter.ReadsLikeRoot && destination.Length > 1
+            && ApexFormatterCache<T>.Instance.TryReadElements(ref Unsafe.As<TReader, ApexSpanReader>(ref reader), destination))
+        {
             return;
         }
 
@@ -175,16 +196,28 @@ public static class ApexSequence
         where TFormatter : IApexFormatter<T>
     {
         int count = source.Count;
-        writer.WriteCollectionHeader(count);
-        int written = 0;
-        foreach (var item in source)
+        if (count <= 0)
         {
-            if (written == count) break;
-            T value = item;
-            TFormatter.Write(ref writer, in value, ref tracker);
-            written++;
+            writer.WriteCollectionHeader(0);
+            return;
         }
-        if (written != count) ThrowCollectionModified();
+        // インターフェースの列挙子(箱詰めされる)を使わず、借りた配列へ CopyTo で一度に写してから書く。
+        // 固定長の要素は一括コピーになる。参照を含む要素は返す前に消す(利用者のオブジェクトを共有プールに残さない)
+        T[] rented = ArrayPool<T>.Shared.Rent(count);
+        try
+        {
+            source.CopyTo(rented, 0);
+            WriteSpan<TWriter, TTracker, T, TFormatter>(ref writer, new ReadOnlySpan<T>(rented, 0, count), ref tracker);
+        }
+        catch (ArgumentException)
+        {
+            // CopyTo の途中で件数が変わった(書き込みと並行して変更された)
+            ThrowCollectionModified();
+        }
+        finally
+        {
+            ArrayPool<T>.Shared.Return(rented, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+        }
     }
 
     /// <summary>任意の列挙を書く。件数が取れない場合は一度配列化する。</summary>

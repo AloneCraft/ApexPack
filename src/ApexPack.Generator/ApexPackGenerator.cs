@@ -56,6 +56,7 @@ public sealed class ApexPackGenerator : IIncrementalGenerator
 
             var model = analyzer.Analyze(symbol);
             if (model is null) continue;
+            model.EmitRootFormatter = !symbol.IsValueType && CanRegister(symbol);
 
             context.AddSource(HintName(symbol), SourceText.From(CodeEmitter.Emit(model), Encoding.UTF8));
             if (CanRegister(symbol)) registrations.Add(model);
@@ -136,7 +137,9 @@ public sealed class ApexPackGenerator : IIncrementalGenerator
         {
             var name = TypeAnalyzer.Name(model.Symbol);
             string preserve = model.RootPreserveReferences ? "true" : "false";
-            sb.Append($"            global::ApexPack.ApexFormatterCache<{name}>.Register(new global::ApexPack.FormatterAdapter<{name}, global::ApexPack.PackableFormatter<{name}>>({preserve}));\n");
+            sb.Append(model.EmitRootFormatter
+                ? $"            global::ApexPack.ApexFormatterCache<{name}>.Register(new {name}.__ApexRootFormatter({preserve}));\n"
+                : $"            global::ApexPack.ApexFormatterCache<{name}>.Register(new global::ApexPack.FormatterAdapter<{name}, global::ApexPack.PackableFormatter<{name}>>({preserve}));\n");
         }
         // MemoryPack 互換の [MemoryPackUnionFormatter]: 実行時 Union として登録する(開いたジェネリックは閉じた型ごとに作る)
         foreach (var union in externalUnions)

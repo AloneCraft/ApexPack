@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -246,5 +247,112 @@ public static class ApexWire
             return Unsafe.SizeOf<T>();
         }
         return 1;
+    }
+
+    /// <summary>メモリ表現の先頭 <paramref name="size"/> バイトだけを写して値を作る(残りの詰め物は 0)。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T ReadPrefix<T>(ref readonly byte source, int size)
+    {
+        T value = default!;
+        CopySmall(ref Unsafe.As<T, byte>(ref value), ref Unsafe.AsRef(in source), size);
+        return value;
+    }
+
+    /// <summary>
+    /// 短い固定長の写し。<paramref name="size"/> が JIT 時の定数なら、分岐が消えて 8 / 4 / 2 / 1 バイトの読み書きだけになる
+    /// (長さが変数の CopyBlock は汎用の写し処理の呼び出しになり、数 ns かかる)。32 バイトを超えたら CopyBlock を使う。
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void CopySmall(ref byte destination, ref byte source, int size)
+    {
+        if (size > 32)
+        {
+            Unsafe.CopyBlockUnaligned(ref destination, ref source, (uint)size);
+            return;
+        }
+        if (size >= 8)
+        {
+            Unsafe.WriteUnaligned(ref destination, Unsafe.ReadUnaligned<ulong>(ref source));
+            if (size >= 16)
+            {
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref destination, 8), Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref source, 8)));
+                if (size >= 24)
+                {
+                    Unsafe.WriteUnaligned(ref Unsafe.Add(ref destination, 16), Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref source, 16)));
+                    if (size >= 32)
+                    {
+                        Unsafe.WriteUnaligned(ref Unsafe.Add(ref destination, 24), Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref source, 24)));
+                    }
+                }
+            }
+        }
+        int offset = size & ~7;
+        if ((size & 4) != 0)
+        {
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref destination, offset), Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref source, offset)));
+            offset += 4;
+        }
+        if ((size & 2) != 0)
+        {
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref destination, offset), Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref source, offset)));
+            offset += 2;
+        }
+        if ((size & 1) != 0)
+        {
+            Unsafe.Add(ref destination, offset) = Unsafe.Add(ref source, offset);
+        }
+    }
+
+    /// <summary>
+    /// 要素の間隔 <paramref name="stride"/> のメモリから、各要素の先頭 <paramref name="size"/> バイトを詰めて並べる(後ろの詰め物を落とす)。
+    /// 16 / 32 バイト単位で読み書きし、書きすぎた分は次の要素で上書きされる。最後の要素だけ正確な長さで写す。
+    /// </summary>
+    public static void PackStrided(ref byte destination, ref byte source, int count, int stride, int size)
+    {
+        if (count <= 0) return;
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && size >= 8 && size <= 16 && stride >= 16)
+        {
+            for (; i < count - 1; i++)
+            {
+                Vector128.LoadUnsafe(ref source, (nuint)(i * stride)).StoreUnsafe(ref destination, (nuint)(i * size));
+            }
+        }
+        else if (Vector256.IsHardwareAccelerated && size > 16 && size <= 32 && stride >= 32)
+        {
+            for (; i < count - 1; i++)
+            {
+                Vector256.LoadUnsafe(ref source, (nuint)(i * stride)).StoreUnsafe(ref destination, (nuint)(i * size));
+            }
+        }
+        for (; i < count; i++)
+        {
+            Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref destination, i * size), ref Unsafe.Add(ref source, i * stride), (uint)size);
+        }
+    }
+
+    /// <summary><see cref="PackStrided"/> の逆。各要素の詰め物の位置には何が入ってもよい。</summary>
+    public static void UnpackStrided(ref byte destination, ref byte source, int count, int stride, int size)
+    {
+        if (count <= 0) return;
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && size >= 8 && size <= 16 && stride >= 16)
+        {
+            for (; i < count - 1; i++)
+            {
+                Vector128.LoadUnsafe(ref source, (nuint)(i * size)).StoreUnsafe(ref destination, (nuint)(i * stride));
+            }
+        }
+        else if (Vector256.IsHardwareAccelerated && size > 16 && size <= 32 && stride >= 32)
+        {
+            for (; i < count - 1; i++)
+            {
+                Vector256.LoadUnsafe(ref source, (nuint)(i * size)).StoreUnsafe(ref destination, (nuint)(i * stride));
+            }
+        }
+        for (; i < count; i++)
+        {
+            Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref destination, i * stride), ref Unsafe.Add(ref source, i * size), (uint)size);
+        }
     }
 }

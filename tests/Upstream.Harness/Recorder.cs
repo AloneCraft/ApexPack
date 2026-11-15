@@ -323,7 +323,7 @@ public sealed class ObjectRecord : CallRecord
     protected override long RunSerialize(int n)
     {
         long start = Stopwatch.GetTimestamp();
-        for (int i = 0; i < n; i++) Direct.SinkLength = Backend.Serialize(_type, _value, _options).Length;
+        for (int i = 0; i < n; i++) Direct.SinkLength = Direct.Serialize(_type, _value, _options).Length;
         return Stopwatch.GetTimestamp() - start;
     }
 
@@ -332,7 +332,7 @@ public sealed class ObjectRecord : CallRecord
         var bytes = _serialized;
         long start = Stopwatch.GetTimestamp();
         object? last = null;
-        for (int i = 0; i < n; i++) last = Backend.Deserialize(_type, bytes, _options);
+        for (int i = 0; i < n; i++) last = Direct.Deserialize(_type, bytes, _options);
         Direct.Sink = last;
         return Stopwatch.GetTimestamp() - start;
     }
@@ -363,6 +363,22 @@ internal static class Direct
         => global::ApexPack.ApexPackSerializer.Deserialize<T>(bytes);
 #else
         => Backend.Deserialize<T>(bytes, options);
+#endif
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    public static byte[] Serialize(Type type, object? value, Options? options)
+#if APEXPACK_BACKEND
+        => global::ApexPack.ApexPackSerializer.Serialize(type, value);
+#else
+        => Backend.Serialize(type, value, options);
+#endif
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    public static object? Deserialize(Type type, byte[] bytes, Options? options)
+#if APEXPACK_BACKEND
+        => global::ApexPack.ApexPackSerializer.Deserialize(type, bytes);
+#else
+        => Backend.Deserialize(type, bytes, options);
 #endif
 }
 

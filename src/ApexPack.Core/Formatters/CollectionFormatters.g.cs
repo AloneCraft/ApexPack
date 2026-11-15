@@ -186,8 +186,17 @@ public readonly struct QueueFormatter<T, TF> : IApexFormatter<Queue<T>?>
         where TTracker : IReferenceTracker, allows ref struct
     {
         if (value is null) { writer.WriteNullCollectionHeader(); return; }
-        writer.WriteCollectionHeader(value.Count);
-        foreach (var element in value) { T item = element; TF.Write(ref writer, in item, ref tracker); }
+        int count = value.Count;
+        T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);
+        try
+        {
+            value.CopyTo(rented, 0);
+            ApexSequence.WriteSpan<TWriter, TTracker, T, TF>(ref writer, new global::System.ReadOnlySpan<T>(rented, 0, count), ref tracker);
+        }
+        finally
+        {
+            global::System.Buffers.ArrayPool<T>.Shared.Return(rented, global::System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+        }
     }
 
     public static Queue<T>? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
@@ -197,13 +206,20 @@ public readonly struct QueueFormatter<T, TF> : IApexFormatter<Queue<T>?>
     {
         int count = ApexSequence.ReadCount<TReader, TGuard, T, TF>(ref reader, ref guard);
         if (count < 0) return null;
-        var collection = new Queue<T>(count);
-        for (int i = 0; i < count; i++) { collection.Enqueue(TF.Read(ref reader, ref tracker, ref guard)); }
-        return collection;
+        T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);
+        try
+        {
+            ApexSequence.ReadElements<TReader, TTracker, TGuard, T, TF>(ref reader, new global::System.Span<T>(rented, 0, count), ref tracker, ref guard);
+            return new Queue<T>(new global::System.ArraySegment<T>(rented, 0, count));
+        }
+        finally
+        {
+            global::System.Buffers.ArrayPool<T>.Shared.Return(rented, global::System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+        }
     }
 }
 
-/// <summary>Stack&lt;T&gt;(先頭から順に書き、逆順に積み直す)。</summary>
+/// <summary>Stack&lt;T&gt;(上から順に書き、逆順に積み直す)。</summary>
 public readonly struct StackFormatter<T, TF> : IApexFormatter<Stack<T>?>
     where TF : IApexFormatter<T>
 {
@@ -212,8 +228,17 @@ public readonly struct StackFormatter<T, TF> : IApexFormatter<Stack<T>?>
         where TTracker : IReferenceTracker, allows ref struct
     {
         if (value is null) { writer.WriteNullCollectionHeader(); return; }
-        writer.WriteCollectionHeader(value.Count);
-        foreach (var element in value) { T item = element; TF.Write(ref writer, in item, ref tracker); }
+        int count = value.Count;
+        T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);
+        try
+        {
+            value.CopyTo(rented, 0);
+            ApexSequence.WriteSpan<TWriter, TTracker, T, TF>(ref writer, new global::System.ReadOnlySpan<T>(rented, 0, count), ref tracker);
+        }
+        finally
+        {
+            global::System.Buffers.ArrayPool<T>.Shared.Return(rented, global::System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+        }
     }
 
     public static Stack<T>? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
@@ -221,11 +246,19 @@ public readonly struct StackFormatter<T, TF> : IApexFormatter<Stack<T>?>
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
-        var array = ApexSequence.ReadArray<TReader, TTracker, TGuard, T, TF>(ref reader, ref tracker, ref guard);
-        if (array is null) return null;
-        var stack = new Stack<T>(array.Length);
-        for (int i = array.Length - 1; i >= 0; i--) stack.Push(array[i]);
-        return stack;
+        int count = ApexSequence.ReadCount<TReader, TGuard, T, TF>(ref reader, ref guard);
+        if (count < 0) return null;
+        T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);
+        try
+        {
+            ApexSequence.ReadElements<TReader, TTracker, TGuard, T, TF>(ref reader, new global::System.Span<T>(rented, 0, count), ref tracker, ref guard);
+            global::System.Array.Reverse(rented, 0, count);
+            return new Stack<T>(new global::System.ArraySegment<T>(rented, 0, count));
+        }
+        finally
+        {
+            global::System.Buffers.ArrayPool<T>.Shared.Return(rented, global::System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+        }
     }
 }
 
@@ -971,7 +1004,7 @@ public readonly struct ConcurrentDictionaryFormatter<TKey, TValue, FK, FV> : IAp
         where TGuard : ISecurityGuard, allows ref struct
     {
         uint header = reader.ReadCompactUInt(); if (header == 0) return null; int count = DictionaryHelper.CheckCount(ref reader, ref guard, header - 1, FK.MinWireSize + FV.MinWireSize);
-        var dictionary = new ConcurrentDictionary<TKey, TValue>();
+        var dictionary = new ConcurrentDictionary<TKey, TValue>(Environment.ProcessorCount, count);
         for (int i = 0; i < count; i++)
         {
             TKey key = FK.Read(ref reader, ref tracker, ref guard);

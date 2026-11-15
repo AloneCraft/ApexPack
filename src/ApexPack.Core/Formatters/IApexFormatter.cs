@@ -28,6 +28,13 @@ public interface IApexFormatter<T>
     /// <summary>LE 機のメモリ表現がワイヤ形式と一致するなら true。</summary>
     static virtual bool IsRawLayout => false;
 
+    /// <summary>
+    /// LE 機のメモリ表現の先頭 <see cref="FixedSize"/> バイトがワイヤ形式と一致し、残りは詰め物だけなら <see cref="FixedSize"/>、
+    /// そうでなければ -1(<see cref="IsRawLayout"/> のときも <see cref="FixedSize"/>)。
+    /// 例: (int, int, int) はメモリ上 16 バイト(後ろ 4 バイトが詰め物)、ワイヤは 12 バイト。先頭 12 バイトを写せばよい。
+    /// </summary>
+    static virtual int RawPrefixSize => -1;
+
     /// <summary>1 要素の最小バイト数(件数ヘッダー検査用)。</summary>
     static virtual int MinWireSize => 1;
 
@@ -42,6 +49,13 @@ public interface IApexFormatter<T>
     /// ルートの直列化は、件数ヘッダー + 要素の一括コピーで書く。
     /// </summary>
     static virtual int RawElementSize => -1;
+
+    /// <summary>
+    /// 要素の読み方が、型に登録されたルート用フォーマッタ(<see cref="ApexFormatterCache{T}.Instance"/>)の
+    /// <see cref="ApexFormatter{T}.TryReadElements"/> と同じなら true([ApexPackable] の null を取り得る位置)。
+    /// 参照型の要素の並びは、そちらへまとめて任せる(共有ジェネリックコードの要素ごとの実行時の検索を省く)。
+    /// </summary>
+    static virtual bool ReadsLikeRoot => false;
 
     static virtual void WriteFixed(ref byte destination, scoped in T value, bool littleEndian)
         => throw new NotSupportedException();
@@ -88,6 +102,13 @@ public abstract class ApexFormatter<T>
         return Read(ref reader, ref tracker, ref guard);
     }
 
+    /// <summary>
+    /// 生成コード用: 追跡なし・信頼済み入力で、要素(null を取り得る位置の形式)を <paramref name="destination"/> の数だけ読む。
+    /// 型を具体的に書いたコードで読めるときだけ実装して true を返す。既定は何もせず false(呼び出し側が要素ごとに読む)。
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public virtual bool TryReadElements(ref ApexSpanReader reader, scoped Span<T> destination) => false;
+
     /// <summary>ルートで自動的に参照追跡を有効にするなら true。</summary>
     public virtual bool PreserveReferences => false;
 
@@ -99,6 +120,9 @@ public abstract class ApexFormatter<T>
 
     /// <summary>固定長型を読む(<see cref="RootFixedSize"/> が 0 以上のときだけ呼ばれる)。</summary>
     public virtual T ReadFixedRoot(ref readonly byte source, bool littleEndian) => throw new NotSupportedException();
+
+    /// <summary>固定長型で、メモリ表現の先頭がそのままワイヤ形式になるならそのバイト数、そうでなければ -1(ルートの高速経路用)。</summary>
+    public virtual int RootRawPrefixSize => -1;
 
     /// <summary>1 次元配列で、要素をメモリからそのまま書けるなら要素のバイト数、そうでなければ -1(ルートの高速経路用)。</summary>
     public virtual int RootRawArrayElementSize => -1;
@@ -266,6 +290,8 @@ public sealed class FormatterAdapter<T, TFormatter> : ApexFormatter<T>
 
     public override int RootRawArrayElementSize => !_preserveReferences && BitConverter.IsLittleEndian ? TFormatter.RawElementSize : -1;
 
+    public override int RootRawPrefixSize => RootFixedSize >= 0 && BitConverter.IsLittleEndian ? TFormatter.RawPrefixSize : -1;
+
     public override void Write<TWriter, TTracker>(ref TWriter writer, scoped in T value, ref TTracker tracker)
         => TFormatter.Write(ref writer, in value, ref tracker);
 
@@ -294,6 +320,12 @@ public sealed class FormatterAdapter<T, TFormatter> : ApexFormatter<T>
     public override byte[] SerializeToArray(scoped in T value)
     {
         if (_preserveReferences) return SerializeWithReferences(in value);
+
+        // 要素をメモリからそのまま書ける 1 次元配列(int[] など)は、件数ヘッダー + 一括コピーで直接書く
+        if (TFormatter.RawElementSize > 0 && BitConverter.IsLittleEndian)
+        {
+            return ApexPackSerializer.SerializeRawArray(Unsafe.As<Array>((object?)value), TFormatter.RawElementSize);
+        }
 
         int fixedSize = TFormatter.FixedSize;
         if (fixedSize >= 0)
@@ -416,6 +448,7 @@ internal static class ApexRootInfo<T>
     public static readonly int FixedSize = ApexFormatterCache<T>.Instance.RootFixedSize;
     public static readonly bool IsRawLayout = ApexFormatterCache<T>.Instance.RootIsRawLayout;
     public static readonly int RawArrayElementSize = ApexFormatterCache<T>.Instance.RootRawArrayElementSize;
+    public static readonly int RawPrefixSize = ApexFormatterCache<T>.Instance.RootRawPrefixSize;
 }
 
 /// <summary>
@@ -484,12 +517,23 @@ public readonly struct CachedFormatter<T> : IApexFormatter<T>
 
     public static int MinWireSize => ApexRootInfo<T>.FixedSize > 0 ? ApexRootInfo<T>.FixedSize : 0;
 
+    public static int RawPrefixSize
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => ApexRootInfo<T>.RawPrefixSize;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteFixed(ref byte destination, scoped in T value, bool littleEndian)
     {
         if (littleEndian && ApexRootInfo<T>.IsRawLayout)
         {
             Unsafe.WriteUnaligned(ref destination, value);
+            return;
+        }
+        if (littleEndian && ApexRootInfo<T>.RawPrefixSize > 0)
+        {
+            ApexWire.CopySmall(ref destination, ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in value)), ApexRootInfo<T>.RawPrefixSize);
             return;
         }
         ApexFormatterCache<T>.Instance.WriteFixedRoot(ref destination, in value, littleEndian);
@@ -499,6 +543,7 @@ public readonly struct CachedFormatter<T> : IApexFormatter<T>
     public static T ReadFixed(ref readonly byte source, bool littleEndian)
     {
         if (littleEndian && ApexRootInfo<T>.IsRawLayout) return Unsafe.ReadUnaligned<T>(in source);
+        if (littleEndian && ApexRootInfo<T>.RawPrefixSize > 0) return ApexWire.ReadPrefix<T>(in source, ApexRootInfo<T>.RawPrefixSize);
         return ApexFormatterCache<T>.Instance.ReadFixedRoot(in source, littleEndian);
     }
 }
@@ -507,6 +552,19 @@ public readonly struct CachedFormatter<T> : IApexFormatter<T>
 /// スレッドごとに 1 つの作業バッファを使い回す。使用中は取り出して null にするので再入しても共有しない。
 /// 中身はバイトだけで、利用者のオブジェクトや型は保持しない。
 /// </summary>
+/// <summary>
+/// 生成コード用: スレッドごとの作業バッファ(<see cref="ApexThreadBuffer"/>)の貸し借り。
+/// </summary>
+[System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+public static class ApexWorkBuffer
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static byte[] Rent() => ApexThreadBuffer.Rent();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Return(byte[] buffer) => ApexThreadBuffer.Return(buffer);
+}
+
 internal static class ApexThreadBuffer
 {
     private const int Size = 65536;

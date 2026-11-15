@@ -77,8 +77,9 @@ public static class ApexPackSerializer
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static byte[] Serialize<T>(T value)
     {
-        // 固定長型は仮想呼び出しを通さずに書く(条件は型ごとの static readonly で、Tier1 では定数になる)
-        int fixedSize = ApexRootInfo<T>.FixedSize;
+        // 固定長型は仮想呼び出しを通さずに書く(条件は型ごとの static readonly で、Tier1 では定数になる)。
+        // 参照型は固定長にならないので調べない(参照型の共有コードでは static の参照ごとに実行時の検索が要るため)
+        int fixedSize = typeof(T).IsValueType ? ApexRootInfo<T>.FixedSize : -1;
         if (fixedSize >= 0)
         {
             var result = GC.AllocateUninitializedArray<byte>(fixedSize);
@@ -86,21 +87,17 @@ public static class ApexPackSerializer
             {
                 ref byte destination = ref MemoryMarshal.GetArrayDataReference(result);
                 if (ApexRootInfo<T>.IsRawLayout) Unsafe.WriteUnaligned(ref destination, value);
+                else if (ApexRootInfo<T>.RawPrefixSize == fixedSize) ApexWire.CopySmall(ref destination, ref Unsafe.As<T, byte>(ref value), fixedSize);
                 else ApexFormatterCache<T>.Instance.WriteFixedRoot(ref destination, in value, BitConverter.IsLittleEndian);
             }
             return result;
         }
-        // 要素をメモリからそのまま書ける 1 次元配列(int[] など)は、件数ヘッダー + 一括コピーで直接書く
-        int elementSize = ApexRootInfo<T>.RawArrayElementSize;
-        if (elementSize > 0)
-        {
-            return SerializeRawArray(Unsafe.As<Array>((object?)value), elementSize);
-        }
+        // 要素をメモリからそのまま書ける 1 次元配列(int[] など)は FormatterAdapter.SerializeToArray が直接書く
         return ApexFormatterCache<T>.Instance.SerializeToArray(in value);
     }
 
     /// <summary>ArrayFormatter と同じ形式(CompactUInt(件数 + 1) + 要素、null は 0)を一度に書く。</summary>
-    private static byte[] SerializeRawArray(Array? array, int elementSize)
+    internal static byte[] SerializeRawArray(Array? array, int elementSize)
     {
         if (array is null) return new byte[] { 0 };
         int length = array.Length;
@@ -165,17 +162,24 @@ public static class ApexPackSerializer
         await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// 型を実行時に指定して書く(<typeparamref name="T"/> を <paramref name="type"/> とした <see cref="Serialize{T}(T)"/> と同じバイト列)。
+    /// <paramref name="value"/> が null なら型の既定値を書く。型が合わなければ <see cref="InvalidCastException"/>。
+    /// </summary>
+    public static byte[] Serialize(Type type, object? value) => ApexObjectBridge.For(type).Serialize(value);
+
     // ================= deserialize =================
 
     /// <summary>任意の型を復元する(信頼済み入力)。</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static T Deserialize<T>(ReadOnlySpan<byte> bytes)
     {
-        // 固定長型は仮想呼び出しを通さずに読む(条件は Tier1 で定数になる)
-        if (ApexRootInfo<T>.FixedSize >= 0)
+        // 固定長型は仮想呼び出しを通さずに読む(条件は Tier1 で定数になる)。参照型は固定長にならないので調べない
+        if (typeof(T).IsValueType && ApexRootInfo<T>.FixedSize >= 0)
         {
             if (bytes.Length < ApexRootInfo<T>.FixedSize) ApexSpanReader.ThrowUnexpectedEndOfBuffer();
             if (ApexRootInfo<T>.IsRawLayout) return Unsafe.ReadUnaligned<T>(ref MemoryMarshal.GetReference(bytes));
+            if (ApexRootInfo<T>.RawPrefixSize == ApexRootInfo<T>.FixedSize) return ApexWire.ReadPrefix<T>(in MemoryMarshal.GetReference(bytes), ApexRootInfo<T>.FixedSize);
             // static readonly の中身は正確な型が分かるので、JIT が脱仮想化してインライン展開できる
             return ApexFormatterCache<T>.Instance.ReadFixedRoot(in MemoryMarshal.GetReference(bytes), BitConverter.IsLittleEndian);
         }
@@ -221,6 +225,12 @@ public static class ApexPackSerializer
         await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
         return Deserialize<T>(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));
     }
+
+    /// <summary>型を実行時に指定して復元する(信頼済み入力)。値型は箱詰めして返す。</summary>
+    public static object? Deserialize(Type type, ReadOnlySpan<byte> bytes) => ApexObjectBridge.For(type).Deserialize(bytes, out _);
+
+    /// <summary>型を実行時に指定して復元し、消費したバイト数を返す。</summary>
+    public static object? Deserialize(Type type, ReadOnlySpan<byte> bytes, out int consumed) => ApexObjectBridge.For(type).Deserialize(bytes, out consumed);
 
     /// <summary>信頼できない入力を上限付きで復元する(再帰爆弾・増幅攻撃・<see cref="Type"/> 名の無断解決を拒否)。</summary>
     public static T DeserializeSafe<T>(ReadOnlySpan<byte> bytes, in ApexSecurityOptions options)

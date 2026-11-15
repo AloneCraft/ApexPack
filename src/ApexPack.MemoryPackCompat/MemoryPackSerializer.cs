@@ -72,7 +72,18 @@ public static class MemoryPackSerializer
     // ---- Type 指定 ----
 
     public static byte[] Serialize(Type type, object? value, MemoryPackSerializerOptions? options = default)
-        => ObjectBridge.For(type).Serialize(value, options);
+    {
+        ArgumentNullException.ThrowIfNull(type);
+        CheckOptions(options);
+        try
+        {
+            return ApexPackSerializer.Serialize(type, value);
+        }
+        catch (Exception e) when (ShouldWrap(e))
+        {
+            throw Wrap(e);
+        }
+    }
 
     public static void Serialize<TBufferWriter>(Type type, in TBufferWriter bufferWriter, object? value, MemoryPackSerializerOptions? options = default)
         where TBufferWriter : IBufferWriter<byte>
@@ -166,7 +177,20 @@ public static class MemoryPackSerializer
     }
 
     public static int Deserialize(Type type, ReadOnlySpan<byte> buffer, ref object? value, MemoryPackSerializerOptions? options = default)
-        => ObjectBridge.For(type).Deserialize(buffer, ref value, options);
+    {
+        ArgumentNullException.ThrowIfNull(type);
+        // 参照型の既存インスタンスへの上書きは対象外(値型は値が入っていても新しく作って返す。型引数つきの入口と同じ)
+        if (!type.IsValueType && value is not null) ApexCompatThrow.Overwrite();
+        try
+        {
+            value = ApexPackSerializer.Deserialize(type, buffer, out int consumed);
+            return consumed;
+        }
+        catch (Exception e) when (ShouldWrap(e))
+        {
+            throw Wrap(e);
+        }
+    }
 
     public static object? Deserialize(Type type, in ReadOnlySequence<byte> buffer, MemoryPackSerializerOptions? options = default)
         => Deserialize(type, buffer.ToArray(), options);
@@ -210,42 +234,4 @@ public static class MemoryPackSerializer
            && e is ApexSecurityException or InvalidOperationException or NotSupportedException or IndexOutOfRangeException or ArgumentOutOfRangeException;
 
     private static MemoryPackSerializationException Wrap(Exception e) => new(e.Message, e);
-
-    /// <summary>
-    /// Type 指定の入口から型引数つきの入口へ橋渡しする。型ごとに 1 つ作って <see cref="ConditionalWeakTable{TKey, TValue}"/> に置く
-    /// (型を強く握らないので、型のアセンブリをアンロードできる)。
-    /// </summary>
-    private abstract class ObjectBridge
-    {
-        private static readonly ConditionalWeakTable<Type, ObjectBridge> s_bridges = new();
-
-        [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "Type 指定の入口は実行時に型を閉じる")]
-        [UnconditionalSuppressMessage("Trimming", "IL2071", Justification = "同上")]
-        public static ObjectBridge For(Type type)
-        {
-            ArgumentNullException.ThrowIfNull(type);
-            return s_bridges.GetValue(type, static t => (ObjectBridge)Activator.CreateInstance(typeof(ObjectBridge<>).MakeGenericType(t))!);
-        }
-
-        public abstract byte[] Serialize(object? value, MemoryPackSerializerOptions? options);
-
-        public abstract int Deserialize(ReadOnlySpan<byte> buffer, ref object? value, MemoryPackSerializerOptions? options);
-    }
-
-    private sealed class ObjectBridge<T> : ObjectBridge
-    {
-        public override byte[] Serialize(object? value, MemoryPackSerializerOptions? options)
-        {
-            var typed = value is null ? default : (T?)value;
-            return MemoryPackSerializer.Serialize(in typed, options);
-        }
-
-        public override int Deserialize(ReadOnlySpan<byte> buffer, ref object? value, MemoryPackSerializerOptions? options)
-        {
-            var typed = value is null ? default : (T?)value;
-            int consumed = MemoryPackSerializer.Deserialize(buffer, ref typed, options);
-            value = typed;
-            return consumed;
-        }
-    }
 }

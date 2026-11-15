@@ -111,6 +111,7 @@ internal sealed class CodeEmitter
                 break;
         }
 
+        if (_m.EmitRootFormatter) EmitRootFormatter();
         Close();
         foreach (var _ in containers) Close();
         if (hasNamespace) Close();
@@ -356,7 +357,7 @@ internal sealed class CodeEmitter
             L($"{t}{(IsClass ? "?" : "")} __v = value;");
             if (HasPreBlob)
             {
-                L($"var __preBuffer = new {BlobWriter}();");
+                L($"var __preBuffer = {Blob}.RentWriter();");
                 L($"var __pre = new global::MemoryPack.MemoryPackWriter<{BlobWriter}>(ref __preBuffer, null);");
             }
             foreach (var c in _m.OnSerializing) CallCallback(c, "__pre");
@@ -364,11 +365,12 @@ internal sealed class CodeEmitter
             {
                 L("__pre.Flush();");
                 L($"{Blob}.Write(ref writer, __preBuffer);");
+                L($"{Blob}.ReturnWriter(__preBuffer);");
             }
             L($"__ApexCore{name}(ref writer, in __v, ref tracker);");
             if (HasPostBlob)
             {
-                L($"var __postBuffer = new {BlobWriter}();");
+                L($"var __postBuffer = {Blob}.RentWriter();");
                 L($"var __post = new global::MemoryPack.MemoryPackWriter<{BlobWriter}>(ref __postBuffer, null);");
             }
             foreach (var c in _m.OnSerialized) CallCallback(c, "__post");
@@ -376,6 +378,7 @@ internal sealed class CodeEmitter
             {
                 L("__post.Flush();");
                 L($"{Blob}.Write(ref writer, __postBuffer);");
+                L($"{Blob}.ReturnWriter(__postBuffer);");
             }
             Close();
         }
@@ -490,12 +493,41 @@ internal sealed class CodeEmitter
         L();
         L($"public static int ApexMinBodySize => {n};");
         L();
+        bool prefixCandidate = _m.FixedRawEligible && n > 0 && _m.Members.All(m => m.Symbol is IFieldSymbol);
+        if (prefixCandidate)
+        {
+            // 後ろに詰め物がある構造体(例: long + int で 16 バイト、ワイヤは 12 バイト)でも、先頭がワイヤと同じなら写すだけでよい
+            L("public static int ApexRawPrefixSize => __ApexPrefix.Size;");
+            L();
+            Open("private static class __ApexPrefix");
+            L("public static readonly int Size = Compute();");
+            L();
+            Open("private static int Compute()");
+            L($"if (!global::System.BitConverter.IsLittleEndian || {Un}.SizeOf<{t}>() < {n}) return -1;");
+            foreach (var cond in _m.FixedRawConditions) L($"if (!({cond})) return -1;");
+            L($"var __probe = default({t});");
+            L($"ref byte __start = ref {Un}.As<{t}, byte>(ref __probe);");
+            int o = 0;
+            foreach (var m in _m.Members)
+            {
+                L($"if ({Un}.ByteOffset(ref __start, ref {Un}.As<{m.TypeName}, byte>(ref {Un}.AsRef(in __probe.{Esc(m.Name)}))) != (nint){o}) return -1;");
+                o += m.Fixed!.Size;
+            }
+            L($"return {n};");
+            Close();
+            Close();
+            L();
+        }
 
         L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
         Open($"public static void WriteFixed(ref byte destination, scoped in {t} value, bool littleEndian)");
         if (_m.FixedRawEligible)
         {
             L($"if (littleEndian && ApexIsRawLayout) {{ {Un}.WriteUnaligned(ref destination, value); return; }}");
+        }
+        if (_m.FixedRawEligible && n > 0 && _m.Members.All(m => m.Symbol is IFieldSymbol))
+        {
+            L($"if (littleEndian && __ApexPrefix.Size > 0) {{ global::ApexPack.Buffers.ApexWire.CopySmall(ref destination, ref {Un}.As<{t}, byte>(ref {Un}.AsRef(in value)), {n}); return; }}");
         }
         int offset = 0;
         foreach (var m in _m.Members)
@@ -511,6 +543,10 @@ internal sealed class CodeEmitter
         if (_m.FixedRawEligible)
         {
             L($"if (littleEndian && ApexIsRawLayout) return {Un}.ReadUnaligned<{t}>(in source);");
+        }
+        if (_m.FixedRawEligible && n > 0 && _m.Members.All(m => m.Symbol is IFieldSymbol))
+        {
+            L($"if (littleEndian && __ApexPrefix.Size > 0) return global::ApexPack.Buffers.ApexWire.ReadPrefix<{t}>(in source, {n});");
         }
         offset = 0;
         foreach (var m in _m.Members)
@@ -570,7 +606,7 @@ internal sealed class CodeEmitter
         L();
 
         // 可変長メンバーも Nullable 固定長もない型は、書くバイト数が値によらず決まる(クラスの null は 1 バイト)
-        if (!WrapCallbacks && !_m.ConditionalFixed && !VariableMembers.Any() && !NullableFixedMembers.Any())
+        if (HasExactSize)
         {
             int body = _m.MaskBytes + _m.FixedBytes;
             string exact = IsClass
@@ -872,6 +908,101 @@ internal sealed class CodeEmitter
             L("return true;");
             Close();
         }
+        Close();
+    }
+
+    /// <summary>書くバイト数が値によらず決まり、ApexExactSize を出す型(Object 種別)。</summary>
+    private bool HasExactSize => _m.Kind == PackKind.Object && !WrapCallbacks && !_m.ConditionalFixed && !VariableMembers.Any() && !NullableFixedMembers.Any();
+
+    /// <summary>
+    /// 型を具体的に書いたルート用フォーマッタ。参照型の FormatterAdapter / PackableFormatter は共有ジェネリックコードになり、
+    /// T の静的メソッドを呼ぶたびに実行時の検索が入る。ここでは自分の型の静的メソッドを直接呼ぶ。
+    /// 形式・参照追跡の扱いは FormatterAdapter と同じ。
+    /// </summary>
+    private void EmitRootFormatter()
+    {
+        string t = _m.SelfName;
+        bool iface = _m.Kind == PackKind.Union && _m.IsInterface;
+        string write = iface
+            ? "__ApexUnionWrite(ref writer, value, ref tracker, false)"
+            : $"{t}.SerializeWithTracker(ref writer, in value, ref tracker)";
+        string read = iface
+            ? "return __ApexUnionRead(ref reader, ref tracker, ref guard);"
+            : $"{t}.DeserializeGuarded(ref reader, out var __value, ref tracker, ref guard); return __value;";
+        string readElement = iface
+            ? "destination[i] = __ApexUnionRead(ref reader, ref tracker, ref guard);"
+            : $"{t}.DeserializeGuarded(ref reader, out destination[i], ref tracker, ref guard);";
+
+        L();
+        L("/// <summary>ルート用フォーマッタ(生成)。モジュール初期化子で登録する。</summary>");
+        Open($"internal sealed class __ApexRootFormatter : {Ns}ApexFormatter<{t}>");
+        L("private readonly bool _preserveReferences;");
+        L();
+        L("public __ApexRootFormatter(bool preserveReferences) => _preserveReferences = preserveReferences;");
+        L();
+        L("public override bool PreserveReferences => _preserveReferences;");
+        L();
+        L($"public override void Write<TWriter, TTracker>(ref TWriter writer, scoped in {t} value, ref TTracker tracker)");
+        L($"    => {write};");
+        L();
+        L($"public override {t} Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)");
+        Open("");
+        L(read);
+        Close();
+        L();
+        foreach (var writer in new[] { "ApexBufferWriter", "ApexSpanWriter" })
+        {
+            L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+            Open($"public override void WriteTo(ref global::ApexPack.Buffers.{writer} writer, scoped in {t} value)");
+            L($"var tracker = new {Ns}NullReferenceTracker();");
+            L($"{write};");
+            Close();
+            L();
+        }
+        Open($"public override bool TryReadElements(ref global::ApexPack.Buffers.ApexSpanReader reader, scoped global::System.Span<{t}> destination)");
+        L($"var tracker = new {Ns}NullReferenceTracker();");
+        L($"var guard = new {Ns}TrustedSecurityGuard();");
+        L($"for (int i = 0; i < destination.Length; i++) {{ {readElement} }}");
+        L("return true;");
+        Close();
+        L();
+        L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+        Open($"public override {t} ReadFrom(ref global::ApexPack.Buffers.ApexSpanReader reader)");
+        L($"var tracker = new {Ns}NullReferenceTracker();");
+        L($"var guard = new {Ns}TrustedSecurityGuard();");
+        L(read);
+        Close();
+        L();
+        Open($"public override byte[] SerializeToArray(scoped in {t} value)");
+        L("if (_preserveReferences) return SerializeWithReferences(in value);");
+        if (HasExactSize)
+        {
+            Open($"if (value is not null)");
+            L($"var __exact = global::System.GC.AllocateUninitializedArray<byte>({t}.ApexExactSize(in value));");
+            L("var __direct = new global::ApexPack.Buffers.ApexSpanWriter(__exact);");
+            L("WriteTo(ref __direct, in value);");
+            L("return __exact;");
+            Close();
+        }
+        L($"var __buffer = {Ns}ApexWorkBuffer.Rent();");
+        L("var __writer = new global::ApexPack.Buffers.ApexBufferWriter(__buffer);");
+        Open("try");
+        L("WriteTo(ref __writer, in value);");
+        L("return __writer.ToArray();");
+        Close();
+        Open("finally");
+        L("__writer.Dispose();");
+        L($"{Ns}ApexWorkBuffer.Return(__buffer);");
+        Close();
+        Close();
+        L();
+        Open($"public override {t} Deserialize(global::System.ReadOnlySpan<byte> source, out int consumed)");
+        L("if (_preserveReferences) return base.Deserialize(source, out consumed);");
+        L("var __reader = new global::ApexPack.Buffers.ApexSpanReader(source);");
+        L("var __result = ReadFrom(ref __reader);");
+        L("consumed = __reader.Consumed;");
+        L("return __result;");
+        Close();
         Close();
     }
 

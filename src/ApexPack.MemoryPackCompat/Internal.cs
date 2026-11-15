@@ -31,6 +31,29 @@ namespace MemoryPack.Internal
     [EditorBrowsable(EditorBrowsableState.Never)]
     public static class ApexCompatBlob
     {
+        // 呼び出しごとに一時バッファを作らないよう、スレッドごとに 1 つ使い回す。
+        // 使用中(コールバックの中から入れ子で直列化した場合など)は空なので、そのときだけ新しく作る
+        [ThreadStatic]
+        private static ArrayBufferWriter<byte>? t_writer;
+
+        // これより大きく伸びたバッファは使い回さない(一度だけの大きな値でメモリを握り続けないため)
+        private const int MaxRetainedCapacity = 64 * 1024;
+
+        public static ArrayBufferWriter<byte> RentWriter()
+        {
+            var writer = t_writer;
+            if (writer is null) return new ArrayBufferWriter<byte>();
+            t_writer = null;
+            return writer;
+        }
+
+        public static void ReturnWriter(ArrayBufferWriter<byte> writer)
+        {
+            if (writer.Capacity > MaxRetainedCapacity) return;
+            writer.ResetWrittenCount();
+            t_writer = writer;
+        }
+
         public static void Write<TWriter>(ref TWriter writer, ArrayBufferWriter<byte> buffer)
             where TWriter : struct, IApexBufferWriter, allows ref struct
         {
@@ -39,11 +62,12 @@ namespace MemoryPack.Internal
             writer.WriteRaw(span);
         }
 
-        public static byte[] Read<TReader>(ref TReader reader)
+        /// <summary>塊を読む。返す範囲は入力そのもの(写さない)なので、続けて reader を読む前に使い終えること。</summary>
+        public static ReadOnlySpan<byte> Read<TReader>(ref TReader reader)
             where TReader : struct, IApexBufferReader, allows ref struct
         {
             int length = checked((int)reader.ReadCompactUInt());
-            return reader.ReadRaw(length).ToArray();
+            return reader.ReadRaw(length);
         }
 
         [DoesNotReturn]
@@ -65,12 +89,51 @@ namespace MemoryPack.Internal
 
         public override void Write<TWriter, TTracker>(ref TWriter writer, scoped in T value, ref TTracker tracker)
         {
-            var buffer = new ArrayBufferWriter<byte>();
+            var buffer = ApexCompatBlob.RentWriter();
             var mp = new MemoryPackWriter<ArrayBufferWriter<byte>>(ref buffer, null);
             T? v = value;
             _formatter.Serialize(ref mp, ref v);
             mp.Flush();
             writer.WriteRaw(buffer.WrittenSpan);
+            ApexCompatBlob.ReturnWriter(buffer);
+        }
+
+        // ルートの入口は ApexPack の writer / reader を通さず、MemoryPack の writer / reader で直接読み書きする
+        // (基底の経路はジェネリックな仮想呼び出しと、一時バッファからの二重の写しが入る)
+
+        public override byte[] SerializeToArray(scoped in T value)
+        {
+            var buffer = ApexCompatBlob.RentWriter();
+            var mp = new MemoryPackWriter<ArrayBufferWriter<byte>>(ref buffer, null);
+            T? v = value;
+            _formatter.Serialize(ref mp, ref v);
+            mp.Flush();
+            var result = buffer.WrittenSpan.ToArray();
+            ApexCompatBlob.ReturnWriter(buffer);
+            return result;
+        }
+
+        public override T Deserialize(ReadOnlySpan<byte> source, out int consumed)
+        {
+            var mp = new MemoryPackReader(source, null);
+            T? value = default;
+            _formatter.Deserialize(ref mp, ref value);
+            consumed = mp.Consumed;
+            return value!;
+        }
+
+        // sealed なので、ここからの Write / Read は仮想呼び出しにならない(入れ子で実行時に解決される位置の入口)
+        public override void WriteTo(ref ApexBufferWriter writer, scoped in T value)
+        {
+            var tracker = new NullReferenceTracker();
+            Write(ref writer, in value, ref tracker);
+        }
+
+        public override T ReadFrom(ref ApexSpanReader reader)
+        {
+            var tracker = new NullReferenceTracker();
+            var guard = new TrustedSecurityGuard();
+            return Read(ref reader, ref tracker, ref guard);
         }
 
         public override T Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)

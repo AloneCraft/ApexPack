@@ -96,6 +96,14 @@ public class TypeCoverageTests
     {
         Seq(new List<int> { 1, 2 }); Seq(new List<string?> { "a", null }); Seq(new List<int?> { 1, null });
         Seq(new LinkedList<int>(new[] { 1, 2 })); Seq(new Queue<int>(new[] { 1, 2 })); Seq(new Stack<int>(new[] { 1, 2, 3 }));
+        // Stack / Queue は借りた配列を経由して一括で読み書きする: 空、参照型、多い件数、内部の環状バッファが折り返した Queue
+        Seq(new Stack<int>()); Seq(new Queue<string?>()); Seq(new Stack<string?>(new[] { "a", null, "c" }));
+        Seq(new Stack<int>(Enumerable.Range(0, 1000))); Seq(new Queue<string>(Enumerable.Range(0, 300).Select(i => i.ToString())));
+        var wrapped = new Queue<int>(8);
+        for (int i = 0; i < 6; i++) wrapped.Enqueue(i);
+        for (int i = 0; i < 4; i++) wrapped.Dequeue();
+        for (int i = 6; i < 11; i++) wrapped.Enqueue(i);
+        Seq(wrapped);
         Seq(new HashSet<int> { 3, 1 }, x => x?.OrderBy(v => v)); Seq(new SortedSet<int> { 3, 1 });
         Seq(new Collection<int> { 1 }); Seq(new ReadOnlyCollection<int>(new[] { 1, 2 }));
         Seq(new ObservableCollection<int> { 1 }); Seq(new ReadOnlyObservableCollection<int>(new ObservableCollection<int> { 1 }));

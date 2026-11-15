@@ -35,6 +35,47 @@ def foreach_w(enumerable, count_expr):
     ]
 
 
+def copy_w(count_expr):
+    # 借りた配列へ CopyTo で一度に写してから WriteSpan で書く(固定長の要素は一括コピー)。並びは列挙の順(Stack は上から)
+    return [
+        NULL_W,
+        f"int count = {count_expr};",
+        "T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);",
+        "try",
+        "{",
+        "    value.CopyTo(rented, 0);",
+        f"    {span_w('new global::System.ReadOnlySpan<T>(rented, 0, count)')}",
+        "}",
+        "finally",
+        "{",
+        "    global::System.Buffers.ArrayPool<T>.Shared.Return(rented, global::System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>());",
+        "}",
+    ]
+
+
+def pooled_r(build, reverse=False):
+    # 借りた配列へ要素を読み、ArraySegment(ICollection<T>)から一括で作る。中間の配列を割り当てない
+    lines = [
+        COUNT_R,
+        "if (count < 0) return null;",
+        "T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);",
+        "try",
+        "{",
+        f"    {SEQ}.ReadElements<TReader, TTracker, TGuard, T, TF>(ref reader, new global::System.Span<T>(rented, 0, count), ref tracker, ref guard);",
+    ]
+    if reverse:
+        lines.append("    global::System.Array.Reverse(rented, 0, count);")
+    lines += [
+        f"    return {build.format(items='new global::System.ArraySegment<T>(rented, 0, count)')};",
+        "}",
+        "finally",
+        "{",
+        "    global::System.Buffers.ArrayPool<T>.Shared.Return(rented, global::System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<T>());",
+        "}",
+    ]
+    return lines
+
+
 def add_r(create, add, result="collection"):
     return [
         COUNT_R,
@@ -93,10 +134,10 @@ SPECS = [
      ["if (value.IsSingleSegment) { " + span_w("value.FirstSpan") + " return; }", span_w("value.ToArray()")],
      arr_r("new ReadOnlySequence<T>(array)", "ReadOnlySequence<T>.Empty")),
     ("LinkedListFormatter", E, EC, "LinkedList<T>?", "LinkedList&lt;T&gt;", foreach_w("value", "value.Count"), add_r("new LinkedList<T>()", "collection.AddLast({item})")),
-    ("QueueFormatter", E, EC, "Queue<T>?", "Queue&lt;T&gt;", foreach_w("value", "value.Count"), add_r("new Queue<T>(count)", "collection.Enqueue({item})")),
-    ("StackFormatter", E, EC, "Stack<T>?", "Stack&lt;T&gt;(先頭から順に書き、逆順に積み直す)", foreach_w("value", "value.Count"),
-     [f"var array = {READ_ARR};", "if (array is null) return null;", "var stack = new Stack<T>(array.Length);",
-      "for (int i = array.Length - 1; i >= 0; i--) stack.Push(array[i]);", "return stack;"]),
+    ("QueueFormatter", E, EC, "Queue<T>?", "Queue&lt;T&gt;", copy_w("value.Count"),
+     pooled_r("new Queue<T>({items})")),
+    ("StackFormatter", E, EC, "Stack<T>?", "Stack&lt;T&gt;(上から順に書き、逆順に積み直す)", copy_w("value.Count"),
+     pooled_r("new Stack<T>({items})", reverse=True)),
     ("HashSetFormatter", E, EC, "HashSet<T>?", "HashSet&lt;T&gt;", foreach_w("value", "value.Count"), add_r("new HashSet<T>(count)", "collection.Add({item})")),
     ("SortedSetFormatter", E, EC, "SortedSet<T>?", "SortedSet&lt;T&gt;", foreach_w("value", "value.Count"), add_r("new SortedSet<T>()", "collection.Add({item})")),
     ("CollectionFormatter", E, EC, "Collection<T>?", "Collection&lt;T&gt;", COLL_W, [f"var list = {READ_LIST};", "return list is null ? null : new Collection<T>(list);"]),
@@ -141,7 +182,7 @@ SPECS = [
     ("ConcurrentDictionaryFormatter", DK, DC, "ConcurrentDictionary<TKey, TValue>?", "ConcurrentDictionary&lt;TKey, TValue&gt;(書き込み時点のスナップショット)",
      [NULL_W, "var snapshot = value.ToArray();", "writer.WriteCollectionHeader(snapshot.Length);",
       "foreach (var pair in snapshot) { TKey key = pair.Key; TValue item = pair.Value; FK.Write(ref writer, in key, ref tracker); FV.Write(ref writer, in item, ref tracker); }"],
-     dict_r("new ConcurrentDictionary<TKey, TValue>()", "dictionary.TryAdd(key, item)")),
+     dict_r("new ConcurrentDictionary<TKey, TValue>(Environment.ProcessorCount, count)", "dictionary.TryAdd(key, item)")),
     ("ReadOnlyDictionaryFormatter", DK, DC, "ReadOnlyDictionary<TKey, TValue>?", "ReadOnlyDictionary&lt;TKey, TValue&gt;", dict_w(),
      dict_r("new Dictionary<TKey, TValue>(count)", "dictionary.Add(key, item)", "new ReadOnlyDictionary<TKey, TValue>(dictionary)")),
     ("DictionaryInterfaceFormatter", DK, DC, "IDictionary<TKey, TValue>?", "IDictionary&lt;TKey, TValue&gt;(Dictionary として復元)", dict_w(), dict_r("new Dictionary<TKey, TValue>(count)", "dictionary.Add(key, item)")),

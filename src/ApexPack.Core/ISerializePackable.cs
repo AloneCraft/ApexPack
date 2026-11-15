@@ -49,6 +49,9 @@ public interface ISerializePackable<T> where T : ISerializePackable<T>
     /// <summary>LE 機のメモリ表現がそのままワイヤ形式になるなら true(配列を一括コピーできる)。</summary>
     static virtual bool ApexIsRawLayout => false;
 
+    /// <summary>LE 機のメモリ表現の先頭 <see cref="ApexFixedSize"/> バイトがワイヤ形式と一致し、残りが詰め物だけならそのバイト数、そうでなければ -1。</summary>
+    static virtual int ApexRawPrefixSize => -1;
+
     /// <summary>本体の最小バイト数(件数ヘッダーの妥当性検査に使う)。</summary>
     static virtual int ApexMinBodySize => 0;
 

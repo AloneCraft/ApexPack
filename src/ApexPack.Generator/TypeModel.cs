@@ -197,6 +197,12 @@ internal sealed class TypeModel
     /// </summary>
     public bool ConditionalFixed;
 
+    /// <summary>
+    /// 型を具体的に書いたルート用フォーマッタ(入れ子クラス __ApexRootFormatter)を出す。非ジェネリックで登録できるクラス・インターフェース。
+    /// 参照型を FormatterAdapter / PackableFormatter(ジェネリック)で扱うと共有コードになり、呼び出しごとに実行時の検索が入るため。
+    /// </summary>
+    public bool EmitRootFormatter;
+
     /// <summary>FixedStruct: 一括コピー可否の静的条件を満たすか。</summary>
     public bool FixedRawEligible;
 

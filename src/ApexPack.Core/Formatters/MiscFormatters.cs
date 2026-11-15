@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Buffers;
 using System.Collections;
 using System.Collections.Generic;
@@ -729,9 +730,26 @@ public readonly struct BitArrayFormatter : IApexFormatter<BitArray?>
         writer.WriteCollectionHeader(length);
         int bytes = (length + 7) >> 3;
         if (bytes == 0) return;
-        var buffer = new byte[bytes];
-        value.CopyTo(buffer, 0);
-        writer.WriteRaw(buffer);
+        // int 単位で写す(BitArray の内部と同じ単位なので速い)。LE 機では int 配列のバイト列がそのままワイヤの並びになる
+        int words = (length + 31) >> 5;
+        int[] buffer = ArrayPool<int>.Shared.Rent(words);
+        try
+        {
+            value.CopyTo(buffer, 0);
+            if (!BitConverter.IsLittleEndian)
+            {
+                for (int i = 0; i < words; i++) buffer[i] = BinaryPrimitives.ReverseEndianness(buffer[i]);
+            }
+            var span = MemoryMarshal.AsBytes(buffer.AsSpan(0, words)).Slice(0, bytes);
+            // 長さを超えるビットは 0 にして書く(内部に残っていても同じバイト列になるように)
+            int extraBits = length & 7;
+            if (extraBits != 0) span[bytes - 1] &= (byte)((1 << extraBits) - 1);
+            writer.WriteRaw(span);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(buffer);
+        }
     }
 
     public static BitArray? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
@@ -744,6 +762,16 @@ public readonly struct BitArrayFormatter : IApexFormatter<BitArray?>
         uint length = header - 1;
         int bytes = (int)((length + 7) >> 3);
         if (length > int.MaxValue || bytes > reader.Remaining) ApexThrowHelper.ThrowInvalidLength((int)Math.Min(length, int.MaxValue));
-        return new BitArray(reader.ReadRaw(bytes).ToArray()) { Length = (int)length };
+        // int 配列へ直接写して作る(一時の byte[] を作らない)。使わないビットは 0 のまま
+        var source = reader.ReadRaw(bytes);
+        var words = new int[(int)((length + 31) >> 5)];
+        source.CopyTo(MemoryMarshal.AsBytes(words.AsSpan()));
+        if (!BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < words.Length; i++) words[i] = BinaryPrimitives.ReverseEndianness(words[i]);
+        }
+        int extra = (int)(length & 31);
+        if (extra != 0) words[^1] &= (1 << extra) - 1;
+        return new BitArray(words) { Length = (int)length };
     }
 }
