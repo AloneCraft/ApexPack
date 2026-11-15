@@ -132,6 +132,8 @@ SPECS = [
     ("ImmutableStackInterfaceFormatter", E, EC, "IImmutableStack<T>?", "IImmutableStack&lt;T&gt;", [ENUM_W],
      [f"var array = {READ_ARR};", "if (array is null) return null;", "Array.Reverse(array);", "return ImmutableStack.Create<T>(array);"]),
     ("ImmutableSetInterfaceFormatter", E, EC, "IImmutableSet<T>?", "IImmutableSet&lt;T&gt;(ImmutableHashSet として復元)", [ENUM_W], arr_r("ImmutableHashSet.Create<T>(array)")),
+    # ---- frozen ----
+    ("FrozenSetFormatter", E, EC, "FrozenSet<T>?", "FrozenSet&lt;T&gt;", [NULL_W, span_w("value.Items.AsSpan()")], arr_r("FrozenSet.ToFrozenSet<T>(array)")),
     # ---- dictionaries ----
     ("DictionaryFormatter", DK, DC, "Dictionary<TKey, TValue>?", "Dictionary&lt;TKey, TValue&gt;", dict_w(), dict_r("new Dictionary<TKey, TValue>(count)", "dictionary.Add(key, item)")),
     ("SortedDictionaryFormatter", DK, DC, "SortedDictionary<TKey, TValue>?", "SortedDictionary&lt;TKey, TValue&gt;", dict_w(), dict_r("new SortedDictionary<TKey, TValue>()", "dictionary.Add(key, item)")),
@@ -150,6 +152,8 @@ SPECS = [
      dict_r("ImmutableSortedDictionary.CreateBuilder<TKey, TValue>()", "dictionary.Add(key, item)", "dictionary.ToImmutable()")),
     ("ImmutableDictionaryInterfaceFormatter", DK, DC, "IImmutableDictionary<TKey, TValue>?", "IImmutableDictionary&lt;TKey, TValue&gt;(ImmutableDictionary として復元)", dict_w(),
      dict_r("ImmutableDictionary.CreateBuilder<TKey, TValue>()", "dictionary.Add(key, item)", "dictionary.ToImmutable()")),
+    ("FrozenDictionaryFormatter", DK, DC, "FrozenDictionary<TKey, TValue>?", "FrozenDictionary&lt;TKey, TValue&gt;", dict_w(),
+     dict_r("new Dictionary<TKey, TValue>(count)", "dictionary.Add(key, item)", "FrozenDictionary.ToFrozenDictionary(dictionary)")),
     ("PriorityQueueFormatter", DK, DCN, "PriorityQueue<TKey, TValue>?", "PriorityQueue&lt;TElement, TPriority&gt;(要素と優先度の組。順序は保存しない)",
      [NULL_W, "writer.WriteCollectionHeader(value.UnorderedItems.Count);",
       "foreach (var (element, priority) in value.UnorderedItems) { TKey key = element; TValue item = priority; FK.Write(ref writer, in key, ref tracker); FV.Write(ref writer, in item, ref tracker); }"],
@@ -188,6 +192,7 @@ def main(path):
         "using System;",
         "using System.Buffers;",
         "using System.Collections.Concurrent;",
+        "using System.Collections.Frozen;",
         "using System.Collections.Generic;",
         "using System.Collections.Immutable;",
         "using System.Collections.ObjectModel;",

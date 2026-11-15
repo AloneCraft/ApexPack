@@ -50,6 +50,42 @@ public partial class PluginGeneric<T>
     public T? Value { get; set; }
 }
 
+/// <summary>参照保持の型を含むだけの型(ルートで参照追跡が始まる経路)。</summary>
+[ApexPackable]
+public partial class PluginNodeHolder
+{
+    public List<PluginNode>? Nodes { get; set; }
+}
+
+/// <summary>実行時 Union の基底(属性なし)。</summary>
+public interface IPluginDynamic
+{
+}
+
+[ApexPackable]
+public partial class PluginDynamicCase : IPluginDynamic
+{
+    public int Value { get; set; }
+}
+
+/// <summary>ジェネリック型の一括登録で扱う型。</summary>
+public class PluginBox<T>
+{
+    public T? Value { get; set; }
+}
+
+public sealed class PluginBoxFormatter<T> : ApexFormatter<PluginBox<T>>
+{
+    public override void Write<TWriter, TTracker>(ref TWriter writer, scoped in PluginBox<T> value, ref TTracker tracker)
+    {
+        var inner = value.Value!;
+        ApexFormatterCache<T>.Instance.Write(ref writer, in inner, ref tracker);
+    }
+
+    public override PluginBox<T> Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
+        => new() { Value = ApexFormatterCache<T>.Instance.Read(ref reader, ref tracker, ref guard) };
+}
+
 /// <summary>ApexPack の各経路を一通り通す入口。テストからリフレクションで呼ぶ。</summary>
 public static class PluginEntry
 {
@@ -95,9 +131,20 @@ public static class PluginEntry
             TypeResolver = name => typeof(PluginEntry).Assembly.GetType(name.Split(',')[0]),
         });
 
+        // ルートからの参照追跡(参照保持の型を含むだけの型)
+        var holder = new PluginNodeHolder { Nodes = new List<PluginNode> { n1, n1 } };
+        var f = ApexPackSerializer.Deserialize<PluginNodeHolder>(ApexPackSerializer.Serialize(holder));
+
+        // 実行時 Union と、ジェネリック型の一括登録(登録表は型を強く握らない)
+        ApexFormatterCache<IPluginDynamic>.Register(new ApexDynamicUnionFormatter<IPluginDynamic>((0, typeof(PluginDynamicCase))));
+        var g = ApexPackSerializer.Deserialize<IPluginDynamic>(ApexPackSerializer.Serialize<IPluginDynamic>(new PluginDynamicCase { Value = 7 }));
+        ApexFormatterRegistry.RegisterGeneric(typeof(PluginBox<>), typeof(PluginBoxFormatter<>));
+        var h = ApexPackSerializer.Deserialize<PluginBox<PluginChild>>(ApexPackSerializer.Serialize(new PluginBox<PluginChild> { Value = new PluginChild { Value = 8 } }));
+
         bool ok = a.Children[0].Value == 2 && a.Map!["k"].Value == 3 && ((PluginCircle)a.Shape!).Radius == 4
             && a.Kind == typeof(PluginChild) && a.Optional![1]!.Value == 5
-            && b.Count == 2 && ReferenceEquals(c, c.Next!.Next) && d.Length == 100 && e.Kind == typeof(PluginChild);
+            && b.Count == 2 && ReferenceEquals(c, c.Next!.Next) && d.Length == 100 && e.Kind == typeof(PluginChild)
+            && ReferenceEquals(f.Nodes![0], f.Nodes[1]) && ((PluginDynamicCase)g).Value == 7 && h.Value!.Value == 8;
         return ok ? "ok" : "mismatch";
     }
 }

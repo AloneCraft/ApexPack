@@ -1,6 +1,7 @@
 <Window x:Class="ApexPack.BenchmarkGui.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:ApexPack.BenchmarkGui"
         Title="ApexPack vs MemoryPack - GUI Performance and Verification Dashboard" Height="780" Width="1200"
         Background="#1E1E2E" WindowStartupLocation="CenterScreen">
     <Window.Resources>
@@ -17,8 +18,26 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Cursor" Value="Hand"/>
         </Style>
+        <Style TargetType="TabItem">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="Tab" Background="#181825" BorderBrush="#313244" BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Padding="16,6" Margin="0,0,4,0">
+                            <ContentPresenter ContentSource="Header" TextElement.Foreground="#A6ADC8" TextElement.FontWeight="SemiBold"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Tab" Property="Background" Value="#313244"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
+    <TabControl Background="#1E1E2E" BorderThickness="0" Padding="0">
+    <TabItem Header="ベンチマーク">
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -130,4 +149,9 @@
             </DockPanel>
         </Border>
     </Grid>
+    </TabItem>
+    <TabItem Header="MemoryPack テスト比較">
+        <local:UpstreamComparisonView/>
+    </TabItem>
+    </TabControl>
 </Window>

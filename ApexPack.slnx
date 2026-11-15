@@ -2,10 +2,18 @@
   <Folder Name="/src/">
     <Project Path="src/ApexPack.Core/ApexPack.Core.csproj" />
     <Project Path="src/ApexPack.Generator/ApexPack.Generator.csproj" />
+    <Project Path="src/ApexPack.MemoryPackCompat/ApexPack.MemoryPackCompat.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ApexPack.Tests/ApexPack.Tests.csproj" />
     <Project Path="tests/ApexPack.Tests.Plugin/ApexPack.Tests.Plugin.csproj" />
+  </Folder>
+  <Folder Name="/tests/upstream/">
+    <Project Path="tests/MemoryPack.Upstream/MemoryPack.Upstream.shproj" />
+    <Project Path="tests/Upstream.Harness/Upstream.Harness.shproj" />
+    <Project Path="tests/Upstream.OnMemoryPack/Upstream.OnMemoryPack.csproj" />
+    <Project Path="tests/Upstream.OnApexPack/Upstream.OnApexPack.csproj" />
+    <Project Path="tests/Upstream.Runner/Upstream.Runner.csproj" />
   </Folder>
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/ApexPack.BenchmarkSuite/ApexPack.BenchmarkSuite.csproj" />

@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    MemoryPack 公式テスト(tests/MemoryPack.Upstream、無改変)を ApexPack で実行する。
+    namespace MemoryPack は互換層(src/ApexPack.MemoryPackCompat)が提供し、[MemoryPackable] などは ApexPack.Generator が読む。
+    比べる相手は Upstream.OnMemoryPack(本物の MemoryPack)。設定は相手とそろえる。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>MemoryPack.Tests</RootNamespace>
+    <GenerateProgramFile>false</GenerateProgramFile>
+    <StartupObject>Upstream.Harness.HarnessProgram</StartupObject>
+    <!-- 上流コードに対する警告は無改変で取り込むため抑止する(Upstream.OnMemoryPack と同じ)。APX003/APX004 は ApexPack.Generator の情報的な警告 -->
+    <NoWarn>$(NoWarn);xUnit1004;xUnit1013;xUnit1026;xUnit1030;xUnit2000;xUnit2002;xUnit2013;xUnit2017;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8620;CS8625;CS8629;CS0618;CS0649;CS0169;CS0414;CS9191;APX003;APX004</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ApexPack.Core\ApexPack.Core.csproj" />
+    <ProjectReference Include="..\..\src\ApexPack.MemoryPackCompat\ApexPack.MemoryPackCompat.csproj" />
+    <ProjectReference Include="..\..\src\ApexPack.Generator\ApexPack.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentAssertions" Version="6.7.0" />
+    <PackageReference Include="RandomFixtureKit" Version="1.0.1" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.4.0" />
+    <PackageReference Include="System.IO.Pipelines" Version="9.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Xunit.Abstractions" />
+    <Using Include="FluentAssertions" />
+    <Using Include="MemoryPack" />
+    <Using Include="MemoryPack.Tests.Utils" />
+  </ItemGroup>
+
+  <Import Project="..\MemoryPack.Upstream\MemoryPack.Upstream.projitems" Label="Shared" />
+  <Import Project="..\Upstream.Harness\Upstream.Harness.projitems" Label="Shared" />
+
+</Project>

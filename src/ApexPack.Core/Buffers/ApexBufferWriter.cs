@@ -98,20 +98,21 @@ public ref struct ApexBufferWriter : IApexBufferWriter, IDisposable
 
 /// <summary>
 /// <see cref="IBufferWriter{T}"/> へ直接書き込む writer。終了時に <see cref="Flush"/> を呼ぶこと。
+/// 書き込み先は参照で持つので、構造体の <see cref="IBufferWriter{T}"/> でも呼び出し元の変数に状態が反映される。
 /// </summary>
 public ref struct ApexBufferWriterAdapter<TBufferWriter> : IApexBufferWriter
     where TBufferWriter : IBufferWriter<byte>
 {
-    private readonly TBufferWriter _target;
+    private ref TBufferWriter _target;
     private Span<byte> _current;
     private int _pending;
     private int _committed;
 
     public static bool IsHostLittleEndian => BitConverter.IsLittleEndian;
 
-    public ApexBufferWriterAdapter(TBufferWriter target)
+    public ApexBufferWriterAdapter(ref TBufferWriter target)
     {
-        _target = target;
+        _target = ref target;
         _current = default;
         _pending = 0;
         _committed = 0;

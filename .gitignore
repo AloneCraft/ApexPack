@@ -12,3 +12,6 @@ artifacts/
 *.userosscache
 *.sln.docstates
 Thumbs.db
+
+# MemoryPack 公式テストの比較結果(計測した PC に依存する。tests/Upstream.Runner が書く)
+upstream_report.json

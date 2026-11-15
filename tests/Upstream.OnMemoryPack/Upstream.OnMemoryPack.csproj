@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    MemoryPack 公式テスト(tests/MemoryPack.Upstream、無改変)を本物の MemoryPack 1.22.0 で実行する。
+    取り込みが正しいことの基準であり、ApexPack 側(Upstream.OnApexPack)と比べる相手でもある。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- 上流の csproj と同じ条件にそろえる(暗黙の using は使わない) -->
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>MemoryPack.Tests</RootNamespace>
+    <!-- 比較用の入口(Upstream.Harness の HarnessProgram.Main)を使う。dotnet test は従来どおり動く -->
+    <GenerateProgramFile>false</GenerateProgramFile>
+    <StartupObject>Upstream.Harness.HarnessProgram</StartupObject>
+    <!-- 上流コードに対する xUnit 解析器と null 許容の警告は、無改変で取り込むため抑止する -->
+    <NoWarn>$(NoWarn);xUnit1004;xUnit1013;xUnit1026;xUnit1030;xUnit2000;xUnit2002;xUnit2013;xUnit2017;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8620;CS8625;CS8629;CS0618;CS0649;CS0169;CS0414;MEMPACK043;CS9191</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MemoryPack" Version="1.22.0" />
+    <PackageReference Include="MemoryPack.Streaming" Version="1.22.0" />
+    <PackageReference Include="FluentAssertions" Version="6.7.0" />
+    <PackageReference Include="RandomFixtureKit" Version="1.0.1" />
+    <!-- 上流のモデルに残っている using Microsoft.CodeAnalysis.* を解決するため(上流の csproj と同じ) -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.4.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- 上流の csproj と同じ global using -->
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="Xunit.Abstractions" />
+    <Using Include="FluentAssertions" />
+    <Using Include="MemoryPack" />
+    <Using Include="MemoryPack.Tests.Utils" />
+  </ItemGroup>
+
+  <Import Project="..\MemoryPack.Upstream\MemoryPack.Upstream.projitems" Label="Shared" />
+  <Import Project="..\Upstream.Harness\Upstream.Harness.projitems" Label="Shared" />
+
+</Project>

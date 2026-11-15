@@ -13,6 +13,22 @@ public sealed class ApexSecurityException : Exception
 }
 
 /// <summary>
+/// ApexPack が持たない機能が要求されたときの例外。<see cref="Feature"/> に機能名を入れる。
+/// MemoryPack 互換層(ApexPack.MemoryPackCompat)も、対象外の機能でこの例外を投げる。
+/// </summary>
+public sealed class ApexFeatureNotSupportedException : NotSupportedException
+{
+    public ApexFeatureNotSupportedException(string feature)
+        : base($"ApexPack does not support: {feature}")
+    {
+        Feature = feature;
+    }
+
+    /// <summary>対応していない機能の名前。</summary>
+    public string Feature { get; }
+}
+
+/// <summary>
 /// 信頼できない入力を読むときの上限。
 /// </summary>
 public readonly struct ApexSecurityOptions
@@ -173,6 +189,29 @@ public struct UntrustedSecurityGuard : ISecurityGuard
 }
 
 /// <summary>
+/// 書き込み側の再帰の上限。参照保持(PreserveReferences)なしで循環したグラフを書くと再帰が終わらず、
+/// スタックあふれでプロセスが落ちる(捕捉できない)。スタックの残りが少なくなったら例外にする。
+/// </summary>
+public static class ApexRecursionGuard
+{
+    /// <summary>スタックの残りを確かめる。不足なら <see cref="ApexSecurityException"/>。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void EnsureStack(Type type)
+    {
+        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack())
+        {
+            ThrowTooDeep(type);
+        }
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowTooDeep(Type type)
+        => throw new ApexSecurityException(
+            $"Serializing '{type.FullName}' nested too deeply. The object graph is probably circular; mark the type with PreserveReferences to keep shared and circular references.");
+}
+
+/// <summary>
 /// 例外送出をホットパスから切り離し、インライン化を妨げない。
 /// </summary>
 public static class ApexThrowHelper
@@ -260,8 +299,16 @@ public static class ApexThrowHelper
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static void ThrowNotSupported(Type type)
     {
+        if (IsAnonymousType(type))
+        {
+            throw new NotSupportedException($"ApexPack does not serialize anonymous type '{type.FullName}'. Declare a named [ApexPackable] type instead.");
+        }
         throw new NotSupportedException($"ApexPack has no formatter for '{type.FullName}'. Mark it [ApexPackable] or register one with ApexFormatterCache<T>.Register.");
     }
+
+    private static bool IsAnonymousType(Type type)
+        => type.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false)
+           && type.Name.Contains("AnonymousType", StringComparison.Ordinal);
 
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]

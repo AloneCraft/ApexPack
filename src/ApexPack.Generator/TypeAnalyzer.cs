@@ -35,14 +35,49 @@ internal sealed class TypeAnalyzer
     // 型の分類
     // ====================================================================
 
+    /// <summary>MemoryPack と同じ名前の属性を提供する互換層のアセンブリ名。本物の MemoryPack の属性には反応しない。</summary>
+    internal const string CompatAssembly = "ApexPack.MemoryPackCompat";
+
+    /// <summary>ApexPack の属性と、同じ役割の MemoryPack 互換属性の対応。</summary>
+    private static readonly Dictionary<string, string> CompatAlias = new()
+    {
+        ["ApexPack.ApexPackableAttribute"] = "MemoryPack.MemoryPackableAttribute",
+        ["ApexPack.ApexOrderAttribute"] = "MemoryPack.MemoryPackOrderAttribute",
+        ["ApexPack.ApexIgnoreAttribute"] = "MemoryPack.MemoryPackIgnoreAttribute",
+        ["ApexPack.ApexIncludeAttribute"] = "MemoryPack.MemoryPackIncludeAttribute",
+        ["ApexPack.ApexConstructorAttribute"] = "MemoryPack.MemoryPackConstructorAttribute",
+        ["ApexPack.ApexUnionAttribute"] = "MemoryPack.MemoryPackUnionAttribute",
+        ["ApexPack.ApexOnSerializingAttribute"] = "MemoryPack.MemoryPackOnSerializingAttribute",
+        ["ApexPack.ApexOnSerializedAttribute"] = "MemoryPack.MemoryPackOnSerializedAttribute",
+        ["ApexPack.ApexOnDeserializingAttribute"] = "MemoryPack.MemoryPackOnDeserializingAttribute",
+        ["ApexPack.ApexOnDeserializedAttribute"] = "MemoryPack.MemoryPackOnDeserializedAttribute",
+    };
+
+    internal static bool IsCompat(AttributeData attribute) => attribute.AttributeClass?.ContainingAssembly?.Name == CompatAssembly;
+
+    /// <summary>属性が指定の ApexPack 属性、または同じ役割の互換属性なら true。</summary>
+    internal static bool Is(AttributeData attribute, string apexName)
+    {
+        var name = attribute.AttributeClass?.ToDisplayString();
+        if (name == apexName) return true;
+        return CompatAlias.TryGetValue(apexName, out var alias) && name == alias && IsCompat(attribute);
+    }
+
+    /// <summary>
+    /// [ApexPackable] または互換の [MemoryPackable]。互換の GenerateType.NoGenerate はコードを作らない印なので、付いていないものとして扱う
+    /// (その型は実行時の登録、たとえば後付け Union で扱う)。
+    /// </summary>
     public static AttributeData? GetPackableAttribute(ISymbol symbol)
-        => symbol.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == "ApexPack.ApexPackableAttribute");
+        => symbol.GetAttributes().FirstOrDefault(a => Is(a, "ApexPack.ApexPackableAttribute") && !IsNoGenerate(a));
+
+    private static bool IsNoGenerate(AttributeData attribute)
+        => IsCompat(attribute) && attribute.ConstructorArguments.Any(arg => arg.Type?.ToDisplayString() == "MemoryPack.GenerateType" && arg.Value is 4);
 
     private static bool HasAttribute(ISymbol symbol, string fullName)
-        => symbol.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == fullName);
+        => symbol.GetAttributes().Any(a => Is(a, fullName));
 
     private static AttributeData? GetAttribute(ISymbol symbol, string fullName)
-        => symbol.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == fullName);
+        => symbol.GetAttributes().FirstOrDefault(a => Is(a, fullName));
 
     /// <summary>[ApexPackable](このコンパイル内で生成中)または ISerializePackable&lt;T&gt; 実装済み(参照先)なら true。</summary>
     public bool IsPackable(ITypeSymbol type)
@@ -171,6 +206,7 @@ internal sealed class TypeAnalyzer
         ["System.Collections.Immutable.IImmutableStack<T>"] = "ImmutableStackInterfaceFormatter",
         ["System.Collections.Immutable.IImmutableSet<T>"] = "ImmutableSetInterfaceFormatter",
         ["System.Lazy<T>"] = "LazyFormatter",
+        ["System.Collections.Frozen.FrozenSet<T>"] = "FrozenSetFormatter",
     };
 
     private static readonly Dictionary<string, string> TwoArg = new()
@@ -186,6 +222,7 @@ internal sealed class TypeAnalyzer
         ["System.Collections.Immutable.ImmutableSortedDictionary<TKey, TValue>"] = "ImmutableSortedDictionaryFormatter",
         ["System.Collections.Immutable.IImmutableDictionary<TKey, TValue>"] = "ImmutableDictionaryInterfaceFormatter",
         ["System.Collections.Generic.PriorityQueue<TElement, TPriority>"] = "PriorityQueueFormatter",
+        ["System.Collections.Frozen.FrozenDictionary<TKey, TValue>"] = "FrozenDictionaryFormatter",
         ["System.Collections.Generic.KeyValuePair<TKey, TValue>"] = "KeyValuePairFormatter",
         ["System.Linq.ILookup<TKey, TElement>"] = "LookupFormatter",
         ["System.Linq.IGrouping<out TKey, out TElement>"] = "GroupingFormatter",
@@ -314,6 +351,10 @@ internal sealed class TypeAnalyzer
         try
         {
             model = AnalyzeCore(symbol);
+            if (model is not null)
+            {
+                model.RootPreserveReferences = model.PreserveReferences || NeedsReferences(symbol, new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+            }
         }
         finally
         {
@@ -341,7 +382,29 @@ internal sealed class TypeAnalyzer
             SelfName = SelfName(symbol),
         };
 
-        if (attribute is not null)
+        if (attribute is not null && IsCompat(attribute))
+        {
+            // MemoryPack 互換: [MemoryPackable(GenerateType, SerializeLayout)] を ApexPack の意味に読み替える
+            model.IsCompat = true;
+            foreach (var arg in attribute.ConstructorArguments)
+            {
+                if (arg.Type?.ToDisplayString() != "MemoryPack.GenerateType" || arg.Value is not int generateType) continue;
+                switch (generateType)
+                {
+                    case 1: // VersionTolerant
+                        return Unsupported(model, "VersionTolerant(スキーマ変更への耐性)");
+                    case 2: // CircularReference
+                        model.PreserveReferences = true;
+                        break;
+                    case 3: // Collection
+                        model.Kind = PackKind.Collection;
+                        break;
+                    case 4: // NoGenerate
+                        return null;
+                }
+            }
+        }
+        else if (attribute is not null)
         {
             foreach (var arg in attribute.NamedArguments)
             {
@@ -356,8 +419,7 @@ internal sealed class TypeAnalyzer
             if (!IsPackable(b)) continue;
             // 生成コードは非抽象クラスに ApexMinBodySize、PreserveReferences = true の型に ApexPreserveReferences を出す
             if (!b.IsAbstract) model.HidesBaseMinBodySize = true;
-            var baseAttribute = GetPackableAttribute(b);
-            if (baseAttribute is not null && baseAttribute.NamedArguments.Any(a => a.Key == "PreserveReferences" && a.Value.Value is true))
+            if (GetPackableAttribute(b) is not null && NeedsReferences(b, new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default)))
             {
                 model.HidesBasePreserveReferences = true;
             }
@@ -382,6 +444,18 @@ internal sealed class TypeAnalyzer
         }
 
         CollectMembers(model);
+        if (model.IsCompat)
+        {
+            // 互換層で対象外とした属性(組み込み属性フォーマッタ、SuppressDefaultInitialization)を使うメンバーがあれば、型ごと対象外にする
+            foreach (var m in model.Members)
+            {
+                var unsupported = m.Symbol.GetAttributes().FirstOrDefault(a => IsCompat(a) && IsUnsupportedCompatAttribute(a));
+                if (unsupported is not null)
+                {
+                    return Unsupported(model, CompatFeatureName(unsupported));
+                }
+            }
+        }
         if (!ApplyOrder(model)) return null;
 
         model.Kind = model.IsValueType && !symbol.IsGenericType && model.Members.All(m => GetFixed(m.Type) is not null && !HasAttribute(m.Symbol, "ApexPack.ApexFormatterAttribute"))
@@ -403,6 +477,123 @@ internal sealed class TypeAnalyzer
         return model;
     }
 
+    /// <summary>
+    /// [MemoryPackUnionFormatter(typeof(IUnion))] + [MemoryPackUnion(tag, typeof(Case))] を付けた型から、後付け Union を読む。
+    /// </summary>
+    public static IEnumerable<ExternalUnionModel> AnalyzeExternalUnions(INamedTypeSymbol holder)
+    {
+        foreach (var attr in holder.GetAttributes())
+        {
+            if (!IsCompat(attr) || attr.AttributeClass?.ToDisplayString() != "MemoryPack.MemoryPackUnionFormatterAttribute") continue;
+            if (attr.ConstructorArguments.Length != 1 || attr.ConstructorArguments[0].Value is not INamedTypeSymbol unionType) continue;
+
+            var model = new ExternalUnionModel();
+            if (unionType.IsUnboundGenericType)
+            {
+                model.IsOpenGeneric = true;
+                model.OpenUnionTypeName = TypeOfName(unionType);
+            }
+            else
+            {
+                model.UnionTypeName = Name(unionType);
+            }
+
+            foreach (var unionAttr in holder.GetAttributes().Where(a => Is(a, "ApexPack.ApexUnionAttribute")))
+            {
+                if (unionAttr.ConstructorArguments.Length != 2 || unionAttr.ConstructorArguments[1].Value is not INamedTypeSymbol derived) continue;
+                ushort tag = Convert.ToUInt16(unionAttr.ConstructorArguments[0].Value);
+                model.Cases.Add(new UnionCase { Tag = tag, TypeName = derived.IsUnboundGenericType ? TypeOfName(derived) : Name(derived) });
+            }
+            yield return model;
+        }
+    }
+
+    /// <summary>typeof に書ける名前。開いたジェネリックは型引数を空にする(global::NS.Outer.Inner&lt;,&gt;)。</summary>
+    private static string TypeOfName(INamedTypeSymbol type)
+    {
+        if (!type.IsUnboundGenericType) return Name(type);
+        string prefix = type.ContainingType is not null
+            ? TypeOfName(type.ContainingType)
+            : type.ContainingNamespace.IsGlobalNamespace ? "global:" : "global::" + type.ContainingNamespace.ToDisplayString();
+        return $"{prefix}.{EscapeIdentifier(type.Name)}<{new string(',', type.Arity - 1)}>".Replace("global:.", "global::");
+    }
+
+    /// <summary>[ApexPackable(PreserveReferences = true)] または互換の GenerateType.CircularReference なら true。</summary>
+    private static bool OwnPreserveReferences(AttributeData attribute)
+        => IsCompat(attribute)
+            ? attribute.ConstructorArguments.Any(a => a.Type?.ToDisplayString() == "MemoryPack.GenerateType" && a.Value is 2)
+            : attribute.NamedArguments.Any(a => a.Key == "PreserveReferences" && a.Value.Value is true);
+
+    /// <summary>
+    /// 型(配列の要素、ジェネリック引数、[ApexPackable] のメンバーと Union の case をたどる)に参照保持の型が含まれるか。
+    /// このコンパイルの [ApexPackable] 型だけを見る(参照先アセンブリの型は実行時の ApexFormatterResolver が判定する)。
+    /// </summary>
+    private bool NeedsReferences(ITypeSymbol type, HashSet<ITypeSymbol> visited)
+    {
+        if (!visited.Add(type)) return false;
+        if (type is IArrayTypeSymbol array) return NeedsReferences(array.ElementType, visited);
+        if (type is not INamedTypeSymbol named) return false;
+        foreach (var argument in named.TypeArguments)
+        {
+            if (NeedsReferences(argument, visited)) return true;
+        }
+
+        var attribute = GetPackableAttribute(named.OriginalDefinition);
+        if (attribute is null) return false;
+        if (OwnPreserveReferences(attribute)) return true;
+
+        for (var current = named; current is not null && current.SpecialType != SpecialType.System_Object; current = current.BaseType)
+        {
+            foreach (var member in current.GetMembers())
+            {
+                if (member.IsStatic || member.IsImplicitlyDeclared) continue;
+                var memberType = member switch
+                {
+                    IFieldSymbol f when f.AssociatedSymbol is null && !f.IsConst => f.Type,
+                    IPropertySymbol p when !p.IsIndexer => p.Type,
+                    _ => null,
+                };
+                if (memberType is not null && NeedsReferences(memberType, visited)) return true;
+            }
+        }
+
+        foreach (var union in named.GetAttributes().Where(a => Is(a, "ApexPack.ApexUnionAttribute")))
+        {
+            if (union.ConstructorArguments.Length == 2 && union.ConstructorArguments[1].Value is INamedTypeSymbol derived
+                && NeedsReferences(derived.IsUnboundGenericType ? derived.OriginalDefinition : derived, visited))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static TypeModel Unsupported(TypeModel model, string feature)
+    {
+        model.Kind = PackKind.Unsupported;
+        model.UnsupportedFeature = feature;
+        return model;
+    }
+
+    /// <summary>互換層で「対象外」として定義した属性(基底クラス MemoryPack.ApexUnsupportedAttribute を持つ)なら true。</summary>
+    private static bool IsUnsupportedCompatAttribute(AttributeData attribute)
+    {
+        for (var t = attribute.AttributeClass; t is not null; t = t.BaseType)
+        {
+            if (t.ToDisplayString() == "MemoryPack.ApexUnsupportedAttribute") return true;
+        }
+        return false;
+    }
+
+    private static string CompatFeatureName(AttributeData attribute)
+    {
+        var name = attribute.AttributeClass!.Name;
+        if (name.EndsWith("Attribute", StringComparison.Ordinal)) name = name.Substring(0, name.Length - "Attribute".Length);
+        return name == "SuppressDefaultInitialization"
+            ? "SuppressDefaultInitialization(スキーマ変更への耐性)"
+            : $"組み込み属性フォーマッタ([{name}])";
+    }
+
     private static string SelfName(INamedTypeSymbol symbol)
         => symbol.TypeParameters.Length == 0
             ? EscapeIdentifier(symbol.Name)
@@ -414,9 +605,14 @@ internal sealed class TypeAnalyzer
     private void AnalyzeUnion(TypeModel model)
     {
         var symbol = model.Symbol;
-        foreach (var attr in symbol.GetAttributes().Where(a => a.AttributeClass?.ToDisplayString() == "ApexPack.ApexUnionAttribute"))
+        foreach (var attr in symbol.GetAttributes().Where(a => Is(a, "ApexPack.ApexUnionAttribute")))
         {
             if (attr.ConstructorArguments.Length != 2 || attr.ConstructorArguments[1].Value is not INamedTypeSymbol derived) continue;
+            // ジェネリックな基底型の case に開いたジェネリック(typeof(Case<>))を書いた場合は、基底型の型引数で閉じる
+            if (derived.IsUnboundGenericType && symbol.IsGenericType && derived.Arity == symbol.Arity)
+            {
+                derived = derived.ConstructedFrom.Construct(symbol.TypeArguments.ToArray());
+            }
             ushort tag = Convert.ToUInt16(attr.ConstructorArguments[0].Value);
             if (model.UnionCases.Any(c => c.Tag == tag))
             {
@@ -585,7 +781,9 @@ internal sealed class TypeAnalyzer
         {
             foreach (var parameter in model.Constructor.Parameters)
             {
-                var member = model.Members.FirstOrDefault(m => string.Equals(m.Name, parameter.Name, StringComparison.OrdinalIgnoreCase));
+                // 名前は大文字小文字を区別せず比べる。先頭の _ は除いて比べる(private フィールド _value とパラメーター value)
+                var member = model.Members.FirstOrDefault(m => string.Equals(m.Name, parameter.Name, StringComparison.OrdinalIgnoreCase))
+                    ?? model.Members.FirstOrDefault(m => string.Equals(m.Name.TrimStart('_'), parameter.Name.TrimStart('_'), StringComparison.OrdinalIgnoreCase));
                 if (member is null)
                 {
                     Report(Diagnostics.ConstructorParameterMismatch, model.Constructor, parameter.Name);
@@ -753,14 +951,19 @@ internal sealed class TypeAnalyzer
     {
         foreach (var method in model.Symbol.GetMembers().OfType<IMethodSymbol>())
         {
-            if (method.MethodKind != MethodKind.Ordinary || method.Parameters.Length != 0) continue;
-            var callback = new CallbackModel { Name = EscapeIdentifier(method.Name), IsStatic = method.IsStatic };
+            if (method.MethodKind != MethodKind.Ordinary) continue;
+            // MemoryPack 互換: (ref MemoryPackWriter<T> writer, ref T? value) / (ref MemoryPackReader reader, ref T? value) も受け付ける
+            bool withStream = model.IsCompat && method.Parameters.Length == 2
+                && method.Parameters.All(p => p.RefKind == RefKind.Ref)
+                && method.Parameters[0].Type.OriginalDefinition.ToDisplayString() is "MemoryPack.MemoryPackWriter<TBufferWriter>" or "MemoryPack.MemoryPackReader";
+            if (method.Parameters.Length != 0 && !withStream) continue;
+            var callback = new CallbackModel { Name = EscapeIdentifier(method.Name), IsStatic = method.IsStatic, WithStream = withStream };
             if (HasAttribute(method, "ApexPack.ApexOnSerializingAttribute")) model.OnSerializing.Add(callback);
             if (HasAttribute(method, "ApexPack.ApexOnSerializedAttribute")) model.OnSerialized.Add(callback);
             if (HasAttribute(method, "ApexPack.ApexOnDeserializedAttribute")) model.OnDeserialized.Add(callback);
             if (HasAttribute(method, "ApexPack.ApexOnDeserializingAttribute"))
             {
-                if (!method.IsStatic && !model.CreateEarly)
+                if (!method.IsStatic && !model.CreateEarly && !model.IsCompat)
                 {
                     Report(Diagnostics.InstanceOnDeserializing, method, method.Name);
                     continue;

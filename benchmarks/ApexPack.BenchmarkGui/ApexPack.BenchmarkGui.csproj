@@ -12,6 +12,8 @@
   <ItemGroup>
     <ProjectReference Include="..\ApexPack.BenchmarkSuite\ApexPack.BenchmarkSuite.csproj" />
     <ProjectReference Include="..\..\src\ApexPack.Core\ApexPack.Core.csproj" />
+    <!-- MemoryPack 公式テストの比較(テストの実行は別プロセス。ここでは比較・分類のコードだけ使う) -->
+    <ProjectReference Include="..\..\tests\Upstream.Runner\Upstream.Runner.csproj" />
   </ItemGroup>
 
 </Project>

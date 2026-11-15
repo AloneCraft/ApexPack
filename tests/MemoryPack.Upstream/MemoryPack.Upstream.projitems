@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MemoryPack 公式テスト(Cysharp/MemoryPack tests/MemoryPack.Tests、MIT)を無改変で共有する。
+  取り込み元と除外は UPSTREAM.md を参照。このフォルダの .cs は編集しないこと。
+  Upstream.OnMemoryPack(本物の MemoryPack)と Upstream.OnApexPack(ApexPack の互換層)が同じソースをコンパイルする。
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MSBuildAllProjects Condition="'$(MSBuildVersion)' == '' Or '$(MSBuildVersion)' &lt; '16.0'">$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
+    <HasSharedItems>true</HasSharedItems>
+    <SharedGUID>6b9f0c2e-4f61-4d55-9a3a-2f4b1d8e7c11</SharedGUID>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
+    <Import_RootNamespace>MemoryPack.Tests</Import_RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)**\*.cs" />
+    <None Include="$(MSBuildThisFileDirectory)UPSTREAM.md" />
+    <None Include="$(MSBuildThisFileDirectory)LICENSE.MemoryPack" />
+  </ItemGroup>
+</Project>

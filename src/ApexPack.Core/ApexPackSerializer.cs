@@ -95,6 +95,17 @@ public static class ApexPackSerializer
     /// <summary>任意の型を <see cref="IBufferWriter{T}"/> へ直接書く。</summary>
     public static void Serialize<T>(IBufferWriter<byte> destination, T value) => ApexFormatterCache<T>.Instance.SerializeToBufferWriter(destination, in value);
 
+    /// <summary>
+    /// 任意の型を <see cref="IBufferWriter{T}"/> へ書く。書き込み先は参照で受け取るので、構造体の書き込み先でも呼び出し元の変数に結果が残る。
+    /// </summary>
+    public static void Serialize<T, TBufferWriter>(ref TBufferWriter destination, T value)
+        where TBufferWriter : IBufferWriter<byte>
+    {
+        var writer = new ApexBufferWriterAdapter<TBufferWriter>(ref destination);
+        ApexFormatterCache<T>.Instance.WriteRoot(ref writer, in value);
+        writer.Flush();
+    }
+
     /// <summary>任意の型をストリームへ書く。</summary>
     public static async ValueTask SerializeAsync<T>(Stream stream, T value, CancellationToken cancellationToken = default)
     {
@@ -146,6 +157,14 @@ public static class ApexPackSerializer
     /// <summary>ストリームの残りすべてを読んで復元する。</summary>
     public static async ValueTask<T> DeserializeAsync<T>(Stream stream, CancellationToken cancellationToken = default)
     {
+        // MemoryStream は残りのバッファから直接読み、読んだ分だけ位置を進める(同じストリームから続けて次の値を読める)
+        if (stream is MemoryStream ms && ms.TryGetBuffer(out var segment))
+        {
+            int position = (int)ms.Position;
+            T value = Deserialize<T>(segment.AsSpan(position), out int consumed);
+            ms.Position = position + consumed;
+            return value;
+        }
         using var buffer = new MemoryStream();
         await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
         return Deserialize<T>(buffer.GetBuffer().AsSpan(0, (int)buffer.Length));

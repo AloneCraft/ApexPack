@@ -1,0 +1,222 @@
+<UserControl x:Class="ApexPack.BenchmarkGui.UpstreamComparisonView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:ApexPack.BenchmarkGui"
+             Background="#1E1E2E">
+    <UserControl.Resources>
+        <local:VerdictBrushConverter x:Key="VerdictBrush"/>
+        <local:RatioBrushConverter x:Key="RatioBrush"/>
+        <local:StatusTextConverter x:Key="StatusText"/>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="FontFamily" Value="Segoe UI, Meiryo"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="Foreground" Value="#89B4FA"/>
+            <Setter Property="BorderBrush" Value="#45475A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="#181825"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="12"/>
+        </Style>
+        <Style x:Key="CardLabel" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="#BAC2DE"/>
+        </Style>
+        <Style x:Key="CardValue" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="22"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Margin" Value="0,4,0,0"/>
+        </Style>
+        <Style x:Key="CardNote" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="Foreground" Value="#6C7086"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="5"/>
+            <RowDefinition Height="190"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 見出しと操作 -->
+        <Border Grid.Row="0" Style="{StaticResource Card}" Padding="16" Margin="0,0,0,12">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Left">
+                    <TextBlock Text="MemoryPack 公式テストの比較" FontSize="20" FontWeight="Bold" Foreground="#A6E3A1"/>
+                    <TextBlock Text="MemoryPack のテストコードを書き換えずに、本物の MemoryPack と ApexPack で実行し、結果・時間・サイズを並べます。時間はテスト中の呼び出しを、テスト後に繰り返し再生して測ります。"
+                               FontSize="12" Foreground="#A6ADC8" Margin="0,4,0,0" TextWrapping="Wrap" MaxWidth="620" HorizontalAlignment="Left"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <CheckBox x:Name="ChkTiming" Content="時間を測る" IsChecked="True" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                    <Button x:Name="BtnBuildRun" Content="▶ ビルドして実行" Margin="0,0,8,0" Background="#A6E3A1" Foreground="#11111B" Click="BtnBuildRun_Click"/>
+                    <Button x:Name="BtnRun" Content="▶ 実行" Margin="0,0,8,0" Click="BtnRun_Click"/>
+                    <Button x:Name="BtnCancel" Content="■ 中止" Margin="0,0,8,0" IsEnabled="False" Click="BtnCancel_Click"/>
+                    <Button x:Name="BtnOpen" Content="📂 結果を開く" Margin="0,0,8,0" Click="BtnOpen_Click"/>
+                    <Button x:Name="BtnSave" Content="📄 JSON 保存" Click="BtnSave_Click"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- 集計 -->
+        <Grid Grid.Row="1" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1.6*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Style="{StaticResource Card}" Margin="0,0,6,0">
+                <StackPanel>
+                    <TextBlock Text="判定の内訳(テスト数)" Style="{StaticResource CardLabel}"/>
+                    <WrapPanel x:Name="PanelCounts" Margin="0,6,0,0"/>
+                </StackPanel>
+            </Border>
+            <Border Grid.Column="1" Style="{StaticResource Card}" Margin="3,0,3,0">
+                <StackPanel>
+                    <TextBlock Text="直列化の速さ" Style="{StaticResource CardLabel}"/>
+                    <TextBlock x:Name="TxtSer" Text="---" Style="{StaticResource CardValue}" Foreground="#89B4FA"/>
+                    <TextBlock Text="テストごとの倍率の幾何平均(MemoryPack ÷ ApexPack、1 より大きいと ApexPack が速い)" Style="{StaticResource CardNote}"/>
+                </StackPanel>
+            </Border>
+            <Border Grid.Column="2" Style="{StaticResource Card}" Margin="3,0,3,0">
+                <StackPanel>
+                    <TextBlock Text="逆直列化の速さ" Style="{StaticResource CardLabel}"/>
+                    <TextBlock x:Name="TxtDes" Text="---" Style="{StaticResource CardValue}" Foreground="#A6E3A1"/>
+                    <TextBlock Text="テストごとの倍率の幾何平均" Style="{StaticResource CardNote}"/>
+                </StackPanel>
+            </Border>
+            <Border Grid.Column="3" Style="{StaticResource Card}" Margin="3,0,3,0">
+                <StackPanel>
+                    <TextBlock Text="合計時間の比" Style="{StaticResource CardLabel}"/>
+                    <TextBlock x:Name="TxtTime" Text="---" Style="{StaticResource CardValue}" Foreground="#CBA6F7"/>
+                    <TextBlock Text="直列化 + 逆直列化の合計(MemoryPack ÷ ApexPack)" Style="{StaticResource CardNote}"/>
+                </StackPanel>
+            </Border>
+            <Border Grid.Column="4" Style="{StaticResource Card}" Margin="6,0,0,0">
+                <StackPanel>
+                    <TextBlock Text="合計サイズの比" Style="{StaticResource CardLabel}"/>
+                    <TextBlock x:Name="TxtSize" Text="---" Style="{StaticResource CardValue}" Foreground="#F9E2AF"/>
+                    <TextBlock x:Name="TxtMeasured" Text="MemoryPack ÷ ApexPack(1 より大きいと ApexPack が小さい)" Style="{StaticResource CardNote}"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- 進捗 -->
+        <Grid Grid.Row="2" Margin="0,0,0,8" x:Name="PanelProgress" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <ProgressBar x:Name="BarProgress" Height="6" Background="#313244" Foreground="#89B4FA" VerticalAlignment="Center"/>
+            <TextBlock x:Name="TxtProgress" Grid.Column="1" Margin="12,0,0,0" FontSize="11" Foreground="#A6ADC8"/>
+        </Grid>
+
+        <!-- 絞り込み -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="判定" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <ComboBox x:Name="CmbVerdict" Width="170" SelectionChanged="Filter_Changed"/>
+            <TextBlock Text="テスト名" VerticalAlignment="Center" Margin="16,0,6,0"/>
+            <TextBox x:Name="TxtSearch" Width="260" Background="#181825" Foreground="#CDD6F4" BorderBrush="#45475A" TextChanged="Filter_Changed"/>
+            <CheckBox x:Name="ChkMeasuredOnly" Content="比べられたものだけ" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="16,0,0,0" Checked="Filter_Changed" Unchecked="Filter_Changed"/>
+            <TextBlock x:Name="TxtRowCount" VerticalAlignment="Center" Margin="16,0,0,0" Foreground="#6C7086"/>
+        </StackPanel>
+
+        <!-- 一覧 -->
+        <Border Grid.Row="4" Style="{StaticResource Card}" Padding="8">
+            <DataGrid x:Name="GridRows" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="True" CanUserSortColumns="True"
+                      Background="Transparent" RowBackground="#181825" AlternatingRowBackground="#1e1e2e"
+                      Foreground="#CDD6F4" GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#313244"
+                      BorderThickness="0" HeadersVisibility="Column" SelectionMode="Single" SelectionChanged="GridRows_SelectionChanged">
+                <DataGrid.ColumnHeaderStyle>
+                    <Style TargetType="DataGridColumnHeader">
+                        <Setter Property="Background" Value="#11111B"/>
+                        <Setter Property="Foreground" Value="#BAC2DE"/>
+                        <Setter Property="Padding" Value="8,6"/>
+                        <Setter Property="FontWeight" Value="SemiBold"/>
+                    </Style>
+                </DataGrid.ColumnHeaderStyle>
+                <DataGrid.CellStyle>
+                    <Style TargetType="DataGridCell">
+                        <Setter Property="BorderThickness" Value="0"/>
+                        <Style.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#45475A"/>
+                                <Setter Property="Foreground" Value="#CDD6F4"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </DataGrid.CellStyle>
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="クラス" Binding="{Binding Class}" Width="150"/>
+                    <DataGridTextColumn Header="テスト" Binding="{Binding TestName}" Width="230"/>
+                    <DataGridTemplateColumn Header="判定" Width="120" SortMemberPath="Verdict">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Verdict}" FontWeight="SemiBold" Foreground="{Binding Verdict, Converter={StaticResource VerdictBrush}}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="MP" Binding="{Binding MemoryPackStatus, Converter={StaticResource StatusText}}" Width="50"/>
+                    <DataGridTextColumn Header="Apex" Binding="{Binding ApexPackStatus, Converter={StaticResource StatusText}}" Width="50"/>
+                    <DataGridTextColumn Header="呼出" Binding="{Binding Calls}" Width="45"/>
+                    <DataGridTextColumn Header="MP 直列化" Binding="{Binding MemoryPackSerializeNs, StringFormat={}{0:N1} ns, TargetNullValue=''}" Width="95"/>
+                    <DataGridTextColumn Header="Apex 直列化" Binding="{Binding ApexPackSerializeNs, StringFormat={}{0:N1} ns, TargetNullValue=''}" Width="95"/>
+                    <DataGridTemplateColumn Header="倍率" Width="60" SortMemberPath="SerializeSpeedup">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding SerializeSpeedup, StringFormat={}{0:F2}x, TargetNullValue=''}" Foreground="{Binding SerializeSpeedup, Converter={StaticResource RatioBrush}}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="MP 逆直列化" Binding="{Binding MemoryPackDeserializeNs, StringFormat={}{0:N1} ns, TargetNullValue=''}" Width="95"/>
+                    <DataGridTextColumn Header="Apex 逆直列化" Binding="{Binding ApexPackDeserializeNs, StringFormat={}{0:N1} ns, TargetNullValue=''}" Width="95"/>
+                    <DataGridTemplateColumn Header="倍率" Width="60" SortMemberPath="DeserializeSpeedup">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding DeserializeSpeedup, StringFormat={}{0:F2}x, TargetNullValue=''}" Foreground="{Binding DeserializeSpeedup, Converter={StaticResource RatioBrush}}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="MP バイト" Binding="{Binding MemoryPackBytes, StringFormat={}{0:N0}, TargetNullValue=''}" Width="80"/>
+                    <DataGridTextColumn Header="Apex バイト" Binding="{Binding ApexPackBytes, StringFormat={}{0:N0}, TargetNullValue=''}" Width="80"/>
+                    <DataGridTemplateColumn Header="サイズ比" Width="*" SortMemberPath="SizeRatio">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding SizeRatio, StringFormat={}{0:F2}x, TargetNullValue=''}" Foreground="{Binding SizeRatio, Converter={StaticResource RatioBrush}}"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <GridSplitter Grid.Row="5" HorizontalAlignment="Stretch" Background="#313244" Height="5"/>
+
+        <!-- 詳細 -->
+        <Border Grid.Row="6" Style="{StaticResource Card}" Margin="0,4,0,0">
+            <TextBox x:Name="TxtDetail" IsReadOnly="True" Background="Transparent" Foreground="#CDD6F4" BorderThickness="0"
+                     FontFamily="Consolas, Meiryo" FontSize="12" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                     Text="行を選ぶと、判定の理由・例外・記録した呼び出しの内訳を表示します。"/>
+        </Border>
+
+        <Border Grid.Row="7" Background="#11111B" CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
+            <TextBlock x:Name="TxtStatus" Text="準備完了" FontSize="11" Foreground="#A6ADC8"/>
+        </Border>
+    </Grid>
+</UserControl>

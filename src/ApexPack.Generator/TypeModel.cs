@@ -17,6 +17,12 @@ internal enum PackKind
 
     /// <summary>ApexGenerateType.Collection(件数 + 要素)。</summary>
     Collection,
+
+    /// <summary>
+    /// ApexPack が持たない機能を要求する型(MemoryPack 互換属性の VersionTolerant など)。
+    /// コンパイルは通し、直列化・逆直列化で ApexFeatureNotSupportedException を投げる。
+    /// </summary>
+    Unsupported,
 }
 
 /// <summary>メンバーのワイヤ上の表し方。</summary>
@@ -99,6 +105,25 @@ internal sealed class CallbackModel
 {
     public string Name = "";
     public bool IsStatic;
+
+    /// <summary>MemoryPack 互換: (ref MemoryPackWriter&lt;T&gt;, ref T?) / (ref MemoryPackReader, ref T?) を受け取る。</summary>
+    public bool WithStream;
+}
+
+/// <summary>MemoryPack 互換の [MemoryPackUnionFormatter]: 別の型(インターフェースなど)に後から付ける Union。</summary>
+internal sealed class ExternalUnionModel
+{
+    /// <summary>閉じた基底型の名前(IsOpenGeneric が false のとき)。</summary>
+    public string UnionTypeName = "";
+
+    /// <summary>基底型が開いたジェネリック(typeof(IUnion&lt;&gt;))として指定された。</summary>
+    public bool IsOpenGeneric;
+
+    /// <summary>開いたジェネリックの基底型(typeof 用、例: global::NS.IUnion&lt;&gt;)。</summary>
+    public string OpenUnionTypeName = "";
+
+    /// <summary>タグと具象型(開いたジェネリックなら具象型も開いた形)。</summary>
+    public List<UnionCase> Cases = new();
 }
 
 internal sealed class TypeModel
@@ -138,6 +163,18 @@ internal sealed class TypeModel
     public string CollectionElementFormatter = "";
 
     public bool PreserveReferences;
+
+    /// <summary>
+    /// ルートで参照追跡を始めるか。自分が PreserveReferences か、メンバー(配列・ジェネリック引数・Union の case を含む)に
+    /// PreserveReferences の型を含むなら true。共有・循環の参照を直列化全体で 1 つの表で扱うため(MemoryPack と同じ)。
+    /// </summary>
+    public bool RootPreserveReferences;
+
+    /// <summary>MemoryPack 互換の属性([MemoryPackable] など)で宣言された型。コールバックは MemoryPack の規則で呼ぶ。</summary>
+    public bool IsCompat;
+
+    /// <summary>Kind が Unsupported のときの機能名。</summary>
+    public string UnsupportedFeature = "";
 
     /// <summary>基底型の生成コードにも ApexMinBodySize がある(new を付ける)。</summary>
     public bool HidesBaseMinBodySize;

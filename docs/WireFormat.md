@@ -103,9 +103,43 @@ v1 の形式とは互換性がない。ペイロードにバージョン情報�
 | 1 | 新しいインスタンス。続けて本体を書く。ID は出現順に 0, 1, 2… と暗黙に振る |
 | n ≥ 2 | ID (n − 2) への後方参照 |
 
+追跡を始める位置:
+
+- **ルート**: ルートの型が参照保持の型を含むなら、ルートから追跡する。「含む」とは、自分が `PreserveReferences` であるか、メンバー(配列の要素・ジェネリック引数・Union の case を含む)をたどって `PreserveReferences` の型に届くこと。生成コードはこの結果を `static bool ApexPreserveReferences` に出し、`List<Node>` などのルートは実行時に要素・型引数をたどって判定する。共有・循環の参照は、直列化全体で 1 つの表で扱う(リストの要素同士や、別のメンバーの間でも同じインスタンスになる)。
+- **途中**: 追跡なしで書いている途中で `PreserveReferences` の型に入った場合(コンパイル時に分からない、実行時に登録した型の中など)は、その型の位置から部分木の追跡を始める。読み取りも同じ位置で始めるので、形式は一致する。
+
 ### ApexGenerateType.Collection
 
 件数 + 要素(コレクションと同じ形式)。型自身のメンバーは書かない。
+
+### 実行時の登録
+
+- `ApexFormatterRegistry.RegisterGeneric(typeof(Box<>), typeof(BoxFormatter<>))`: 開いたジェネリック型にフォーマッタを一括登録する。形式は登録したフォーマッタのもの。`RegisterGenericFactory` は閉じた型を受け取ってフォーマッタを作る。
+- `ApexDynamicUnionFormatter<T>`: 基底型に `[ApexUnion]` を付けられないときの Union。形式は `[ApexUnion]` と同じ(`CompactUInt(タグ + 1)` + 具象型の本体、0 は null)。`Add` / `Remove` で実行中に対応を変えられる。`ApexDynamicUnion.RegisterGeneric(typeof(IUnion<>), (0, typeof(Case<>)))` は、開いたジェネリックの基底型と具象型を、同じ型引数で閉じて対応づける。
+- 登録表は `ConditionalWeakTable` か、型ごとの `ApexFormatterCache<T>` に置く(型を強く握らない)。
+
+### 低レベル API(`ApexLowLevelExtensions`)
+
+手書きのフォーマッタ向け。
+
+| 操作 | 形式 |
+| --- | --- |
+| `WriteObjectHeader(n)`(n ≤ 254) | 1 バイト `n + 1` |
+| `WriteNullObjectHeader()` / `PeekIsNull()` | 1 バイト `0` / 次のバイトが 0 か(読み進めない) |
+| `WriteCollectionHeader(n)` / `TryReadCollectionHeader` | コレクションと同じ `CompactUInt(n + 1)`、null は 0 |
+| `WriteVarInt(long)` / `ReadVarInt()` | ZigZag 符号化した値を 7 ビットずつ、下位から(続きがあれば最上位ビット 1)。最大 10 バイト |
+| `WriteVarUInt(ulong)` / `ReadVarUInt()` | 符号なしの値を 7 ビットずつ、下位から |
+
+## MemoryPack 互換層(`src/ApexPack.MemoryPackCompat`)
+
+MemoryPack と同じ名前の API(`namespace MemoryPack`)を ApexPack の上に実装する。ワイヤ形式は ApexPack のもので、MemoryPack とのバイト列の互換はない。
+
+- ジェネレーターは、このアセンブリの `[MemoryPackable]` などを ApexPack の属性と同じ意味に読む(本物の MemoryPack の属性には反応しない)。`GenerateType.CircularReference` → `PreserveReferences`、`Collection` → `ApexGenerateType.Collection`、`NoGenerate` → 生成しない。
+- `[MemoryPackUnionFormatter(typeof(IUnion))]` + `[MemoryPackUnion]` は、実行時 Union として自動登録する。
+- コールバックは MemoryPack の規則で呼ぶ(宣言順。直列化では static は値が null でも呼び、インスタンスメソッドは値があるときだけ。新しく作る逆直列化では `OnDeserializing` は static だけ)。writer / reader を受け取るコールバックが読み書きするデータは、本体の前後に長さ付きの塊として置く(その段階に該当するコールバックがある型だけ)。
+- 低レベル API の `MemoryPackWriter` / `MemoryPackReader` は ApexPack の writer / reader として動き、ヘッダーと可変長整数は上の表の形式で書く(`MemoryPackCode.NullObject` は 0)。可変長整数は型によらず符号つき(ZigZag)で書くので、書いた型と違う `ReadVarIntXxx` でも読める。
+- ApexPack が持たない機能は、機能名つきの `ApexFeatureNotSupportedException` を投げる: VersionTolerant と `SuppressDefaultInitialization`(スキーマ変更への耐性)、既存インスタンスへの上書き(`Deserialize` の `ref` 引数に値が入っている)、組み込み属性フォーマッタ(`[BrotliFormatter]` など)、Brotli 圧縮、`MemoryPackSerializerOptions.Utf16`、使った後のフォーマッタ差し替え。
+- MemoryPack 公式テストでの比較: `tests/Upstream.Runner`(コマンドライン)と、`benchmarks/ApexPack.BenchmarkGui` の「MemoryPack テスト比較」タブ。手順と分類は `tests/MemoryPack.Upstream/UPSTREAM.md`。
 
 ## エンディアン
 
@@ -122,6 +156,7 @@ v1 の形式とは互換性がない。ペイロードにバージョン情報�
   - クラス要素の最小サイズは 1 バイトとして扱う(null や後方参照があり得るため)
 - `DeserializeSafe` と `ApexSerializerOptions.Security` では、深さ・1 コレクションの件数・総要素数に上限を設ける。
 - `Type` の値は型名で書く。信頼できない入力では `ApexSerializerOptions.TypeResolver` を指定しないと解決しない。
+- 書き込み側: 参照保持なしで循環したグラフを書くと再帰が終わらない。参照型のメンバーを持つクラスは、本体を書く前にスタックの残りを確かめ(`RuntimeHelpers.TryEnsureSufficientExecutionStack`)、足りなければ `ApexSecurityException` にする(スタックあふれでプロセスが落ちるのを防ぐ)。
 
 ## アンロード可能性(不変条件)
 

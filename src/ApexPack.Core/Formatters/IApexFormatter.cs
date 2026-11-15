@@ -92,7 +92,7 @@ public abstract class ApexFormatter<T>
 
     public virtual void SerializeToBufferWriter(IBufferWriter<byte> destination, scoped in T value)
     {
-        var writer = new ApexBufferWriterAdapter<IBufferWriter<byte>>(destination);
+        var writer = new ApexBufferWriterAdapter<IBufferWriter<byte>>(ref destination);
         WriteRoot(ref writer, in value);
         writer.Flush();
     }
@@ -153,8 +153,9 @@ public abstract class ApexFormatter<T>
         }
     }
 
+    /// <summary>ルートとして書く(参照追跡が必要な型なら追跡を有効にする)。任意の writer で使える。</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void WriteRoot<TWriter>(ref TWriter writer, scoped in T value)
+    public void WriteRoot<TWriter>(ref TWriter writer, scoped in T value)
         where TWriter : struct, IApexBufferWriter, allows ref struct
     {
         if (PreserveReferences)
@@ -174,8 +175,10 @@ public abstract class ApexFormatter<T>
         Write(ref writer, in value, ref tracker);
     }
 
+    /// <summary>ルートとして読む(参照追跡が必要な型なら追跡を有効にする)。任意の reader で使える。</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private T ReadRoot<TGuard>(ref ApexSpanReader reader, ref TGuard guard)
+    public T ReadRoot<TReader, TGuard>(ref TReader reader, ref TGuard guard)
+        where TReader : struct, IApexBufferReader, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
         if (PreserveReferences)
@@ -323,7 +326,7 @@ public static class ApexFormatterCache<T>
         private static ApexFormatter<T> Create()
         {
             Volatile.Write(ref s_created, 1);
-            return s_registered ?? ApexFormatterResolver.Create<T>();
+            return s_registered ?? ApexFormatterRegistry.TryCreate<T>() ?? ApexFormatterResolver.Create<T>();
         }
     }
 }

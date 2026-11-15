@@ -56,6 +56,7 @@ public static class ApexFormatterResolver
         [typeof(ImmutableQueue<>)] = typeof(ImmutableQueueFormatter<,>),
         [typeof(ImmutableStack<>)] = typeof(ImmutableStackFormatter<,>),
         [typeof(ImmutableHashSet<>)] = typeof(ImmutableHashSetFormatter<,>),
+        [typeof(System.Collections.Frozen.FrozenSet<>)] = typeof(FrozenSetFormatter<,>),
         [typeof(ImmutableSortedSet<>)] = typeof(ImmutableSortedSetFormatter<,>),
         [typeof(IImmutableList<>)] = typeof(ImmutableListInterfaceFormatter<,>),
         [typeof(IImmutableQueue<>)] = typeof(ImmutableQueueInterfaceFormatter<,>),
@@ -74,6 +75,7 @@ public static class ApexFormatterResolver
         [typeof(IDictionary<,>)] = typeof(DictionaryInterfaceFormatter<,,,>),
         [typeof(IReadOnlyDictionary<,>)] = typeof(ReadOnlyDictionaryInterfaceFormatter<,,,>),
         [typeof(ImmutableDictionary<,>)] = typeof(ImmutableDictionaryFormatter<,,,>),
+        [typeof(System.Collections.Frozen.FrozenDictionary<,>)] = typeof(FrozenDictionaryFormatter<,,,>),
         [typeof(ImmutableSortedDictionary<,>)] = typeof(ImmutableSortedDictionaryFormatter<,,,>),
         [typeof(IImmutableDictionary<,>)] = typeof(ImmutableDictionaryInterfaceFormatter<,,,>),
         [typeof(PriorityQueue<,>)] = typeof(PriorityQueueFormatter<,,,>),
@@ -116,9 +118,35 @@ public static class ApexFormatterResolver
             return new UnsupportedFormatter<T>();
         }
 
-        bool preserveReferences = typeof(T).GetCustomAttribute<ApexPackableAttribute>(inherit: false)?.PreserveReferences ?? false;
+        bool preserveReferences = NeedsReferences(typeof(T), 0);
         var adapterType = typeof(FormatterAdapter<,>).MakeGenericType(typeof(T), formatterType);
-        return (ApexFormatter<T>)Activator.CreateInstance(adapterType, preserveReferences)!;
+        // 引数は配列で渡す(bool 1 つだと CreateInstance(Type, bool nonPublic) が選ばれ、コンストラクタに渡らない)
+        return (ApexFormatter<T>)Activator.CreateInstance(adapterType, new object[] { preserveReferences })!;
+    }
+
+    /// <summary>
+    /// ルートで参照追跡を始めるか。[ApexPackable] 型は生成コードの static ApexPreserveReferences
+    /// (自分かメンバーに参照保持の型を含む)で決め、配列・ジェネリック型(List&lt;Node&gt; など)は要素・型引数をたどる。
+    /// </summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = "非 AOT 経路")]
+    [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "非 AOT 経路")]
+    private static bool NeedsReferences(Type type, int depth)
+    {
+        if (depth > 8) return false;
+        if (type.GetCustomAttribute<ApexPackableAttribute>(inherit: false) is { PreserveReferences: true }) return true;
+        if (IsPackable(type))
+        {
+            return type.GetProperty("ApexPreserveReferences", BindingFlags.Public | BindingFlags.Static)?.GetValue(null) is true;
+        }
+        if (type.IsArray) return NeedsReferences(type.GetElementType()!, depth + 1);
+        if (type.IsGenericType)
+        {
+            foreach (var argument in type.GetGenericArguments())
+            {
+                if (NeedsReferences(argument, depth + 1)) return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>

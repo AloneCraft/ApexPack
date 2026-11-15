@@ -3,6 +3,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
@@ -816,6 +817,28 @@ public readonly struct ImmutableSetInterfaceFormatter<T, TF> : IApexFormatter<II
     }
 }
 
+/// <summary>FrozenSet&lt;T&gt;。</summary>
+public readonly struct FrozenSetFormatter<T, TF> : IApexFormatter<FrozenSet<T>?>
+    where TF : IApexFormatter<T>
+{
+    public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in FrozenSet<T>? value, ref TTracker tracker)
+        where TWriter : struct, IApexBufferWriter, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+    {
+        if (value is null) { writer.WriteNullCollectionHeader(); return; }
+        ApexSequence.WriteSpan<TWriter, TTracker, T, TF>(ref writer, value.Items.AsSpan(), ref tracker);
+    }
+
+    public static FrozenSet<T>? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
+        where TReader : struct, IApexBufferReader, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+        where TGuard : ISecurityGuard, allows ref struct
+    {
+        var array = ApexSequence.ReadArray<TReader, TTracker, TGuard, T, TF>(ref reader, ref tracker, ref guard);
+        return array is null ? null : FrozenSet.ToFrozenSet<T>(array);
+    }
+}
+
 /// <summary>Dictionary&lt;TKey, TValue&gt;。</summary>
 public readonly struct DictionaryFormatter<TKey, TValue, FK, FV> : IApexFormatter<Dictionary<TKey, TValue>?>
     where TKey : notnull
@@ -1134,6 +1157,38 @@ public readonly struct ImmutableDictionaryInterfaceFormatter<TKey, TValue, FK, F
             dictionary.Add(key, item);
         }
         return dictionary.ToImmutable();
+    }
+}
+
+/// <summary>FrozenDictionary&lt;TKey, TValue&gt;。</summary>
+public readonly struct FrozenDictionaryFormatter<TKey, TValue, FK, FV> : IApexFormatter<FrozenDictionary<TKey, TValue>?>
+    where TKey : notnull
+    where FK : IApexFormatter<TKey>
+    where FV : IApexFormatter<TValue>
+{
+    public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in FrozenDictionary<TKey, TValue>? value, ref TTracker tracker)
+        where TWriter : struct, IApexBufferWriter, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+    {
+        if (value is null) { writer.WriteNullCollectionHeader(); return; }
+        writer.WriteCollectionHeader(value.Count);
+        foreach (var pair in value) { TKey key = pair.Key; TValue item = pair.Value; FK.Write(ref writer, in key, ref tracker); FV.Write(ref writer, in item, ref tracker); }
+    }
+
+    public static FrozenDictionary<TKey, TValue>? Read<TReader, TTracker, TGuard>(ref TReader reader, ref TTracker tracker, ref TGuard guard)
+        where TReader : struct, IApexBufferReader, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+        where TGuard : ISecurityGuard, allows ref struct
+    {
+        uint header = reader.ReadCompactUInt(); if (header == 0) return null; int count = DictionaryHelper.CheckCount(ref reader, ref guard, header - 1, FK.MinWireSize + FV.MinWireSize);
+        var dictionary = new Dictionary<TKey, TValue>(count);
+        for (int i = 0; i < count; i++)
+        {
+            TKey key = FK.Read(ref reader, ref tracker, ref guard);
+            TValue item = FV.Read(ref reader, ref tracker, ref guard);
+            dictionary.Add(key, item);
+        }
+        return FrozenDictionary.ToFrozenDictionary(dictionary);
     }
 }
 

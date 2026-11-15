@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MemoryPack 公式テストの比較用の仕掛け。Upstream.OnMemoryPack と Upstream.OnApexPack が同じソースをコンパイルする。
+  - MemoryPackSerializer.cs: 上流テストの MemoryPackSerializer 呼び出しを横取りして記録する(呼び先は各プロジェクトの MemoryPack)
+  - Recorder.cs: 記録と、テスト後の再生による計測
+  - HarnessProgram.cs: テスト DLL を harness 引数つきで起動すると、全テストを実行して JSON を書く
+  - HarnessResult.cs: 結果の JSON の形(Upstream.Runner と共有)
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MSBuildAllProjects Condition="'$(MSBuildVersion)' == '' Or '$(MSBuildVersion)' &lt; '16.0'">$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
+    <HasSharedItems>true</HasSharedItems>
+    <SharedGUID>0d3c5a71-8e2b-4c39-9f4e-6a1b7c2d9e80</SharedGUID>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
+    <Import_RootNamespace>Upstream.Harness</Import_RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)*.cs" />
+  </ItemGroup>
+</Project>

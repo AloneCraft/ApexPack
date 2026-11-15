@@ -46,6 +46,34 @@ public ref struct ApexSpanReader : IApexBufferReader
         return Unsafe.Add(ref MemoryMarshal.GetReference(_span), _consumed);
     }
 
+    /// <summary>まだ読んでいない残りの領域。</summary>
+    public readonly ReadOnlySpan<byte> RemainingSpan => _span.Slice(_consumed);
+
+    /// <summary>
+    /// 読み進めずに、現在位置の参照を返す。<paramref name="sizeHint"/> バイトが残っていることを確かめる。
+    /// 読んだ後は <see cref="Advance"/> で位置を進める。
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly ref readonly byte GetSpanReference(int sizeHint)
+    {
+        if ((uint)sizeHint > (uint)(_span.Length - _consumed))
+        {
+            ThrowUnexpectedEndOfBuffer();
+        }
+        return ref Unsafe.Add(ref MemoryMarshal.GetReference(_span), _consumed);
+    }
+
+    /// <summary>読み取り位置を進める。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Advance(int count)
+    {
+        if ((uint)count > (uint)(_span.Length - _consumed))
+        {
+            ThrowUnexpectedEndOfBuffer();
+        }
+        _consumed += count;
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static void ThrowUnexpectedEndOfBuffer()
     {

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    MemoryPack と同じ名前の API(namespace MemoryPack)を ApexPack の上に実装する互換層。
+    MemoryPack 公式テストを無改変で ApexPack に流すため(tests/Upstream.OnApexPack)と、MemoryPack からの移行のために使う。
+    バイト列の互換はない(ワイヤ形式は ApexPack のもの)。ApexPack が持たない機能は ApexFeatureNotSupportedException を投げる。
+    ジェネレーター(ApexPack.Generator)は、このアセンブリの [MemoryPackable] などを ApexPack の属性と同じ意味に読む。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>MemoryPack</RootNamespace>
+    <AssemblyName>ApexPack.MemoryPackCompat</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ApexPack.Core\ApexPack.Core.csproj" />
+  </ItemGroup>
+
+</Project>

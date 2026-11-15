@@ -100,9 +100,14 @@ internal sealed class CodeEmitter
                 EmitForwarders();
                 EmitCollection();
                 break;
+            case PackKind.Unsupported:
+                EmitForwarders();
+                EmitUnsupported();
+                break;
             default:
                 EmitForwarders();
                 EmitObject();
+                if (WrapCallbacks) EmitCompatCallbackWrappers();
                 break;
         }
 
@@ -157,7 +162,7 @@ internal sealed class CodeEmitter
         L("DeserializeGuarded(ref reader, out value, ref tracker, ref guard);");
         Close();
         L();
-        if (_m.PreserveReferences)
+        if (_m.RootPreserveReferences)
         {
             L($"public static {(_m.HidesBasePreserveReferences ? "new " : "")}bool ApexPreserveReferences => true;");
             L();
@@ -170,9 +175,9 @@ internal sealed class CodeEmitter
         Raw(Indent(WriterConstraints));
     }
 
-    private void SignatureRead(string name)
+    private void SignatureRead(string name, string access = "public static ")
     {
-        L($"public static void {name}<TReader, TTracker, TGuard>(ref TReader reader, scoped out {_m.SelfName} value, ref TTracker tracker, ref TGuard guard)");
+        L($"{access}void {name}<TReader, TTracker, TGuard>(ref TReader reader, scoped out {_m.SelfName} value, ref TTracker tracker, ref TGuard guard)");
         Raw(Indent(ReaderConstraints));
     }
 
@@ -267,6 +272,138 @@ internal sealed class CodeEmitter
     }
 
     // ====================================================================
+    // 対象外(MemoryPack 互換属性で ApexPack が持たない機能を要求された型)
+    // ====================================================================
+
+    private void EmitUnsupported()
+    {
+        string feature = _m.UnsupportedFeature.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        string throwExpr = $"throw new {Ns}ApexFeatureNotSupportedException(\"{feature}\");";
+        SignatureWrite("SerializeWithTracker");
+        L($"    => {throwExpr}");
+        L();
+        SignatureRead("DeserializeGuarded");
+        L($"    => {throwExpr}");
+    }
+
+    // ====================================================================
+    // MemoryPack 互換のコールバック
+    // ====================================================================
+    //
+    // MemoryPack の呼び出し規則に合わせる(宣言順):
+    //   直列化:   OnSerializing → 本体 → OnSerialized。static は値が null でも呼び、インスタンスメソッドは値があるときだけ呼ぶ。
+    //   逆直列化: OnDeserializing は static だけ(新しく作る場合、MemoryPack はインスタンスメソッドを呼ばない)
+    //             → 本体 → OnDeserialized(static は常に、インスタンスメソッドは値があるときだけ)。
+    // writer / reader を受け取るコールバックの読み書きは、前後 2 つの長さ付きの塊として本体の外側に置く:
+    //   [前の塊(OnSerializing が書いたもの)][本体][後の塊(OnSerialized が書いたもの)]
+    // 塊は、その段階に writer / reader を受け取るコールバックがある型だけが持つ。
+
+    private bool HasAnyCallback => _m.OnSerializing.Count + _m.OnSerialized.Count + _m.OnDeserializing.Count + _m.OnDeserialized.Count > 0;
+
+    /// <summary>互換型でコールバックがあれば、入口メソッドを包んでコールバックを呼ぶ。</summary>
+    private bool WrapCallbacks => _m.IsCompat && HasAnyCallback && _m.Kind == PackKind.Object;
+
+    private bool HasPreBlob => _m.OnSerializing.Concat(_m.OnDeserializing).Any(c => c.WithStream);
+    private bool HasPostBlob => _m.OnSerialized.Concat(_m.OnDeserialized).Any(c => c.WithStream);
+
+    /// <summary>包まれる側の入口メソッド名。</summary>
+    private string Entry(string name) => WrapCallbacks ? "__ApexCore" + name : name;
+
+    private string EntryAccess => WrapCallbacks ? "private static " : "public static ";
+
+    private const string Blob = "global::MemoryPack.Internal.ApexCompatBlob";
+    private const string BlobWriter = "global::System.Buffers.ArrayBufferWriter<byte>";
+
+    private void CallCallback(CallbackModel c, string stream)
+    {
+        string args = c.WithStream ? $"ref {stream}, ref __v" : "";
+        if (c.IsStatic)
+        {
+            L($"{c.Name}({args});");
+        }
+        else if (IsClass)
+        {
+            L($"if (__v is not null) __v.{c.Name}({args});");
+        }
+        else
+        {
+            L($"__v.{c.Name}({args});");
+        }
+    }
+
+    private void EmitCompatCallbackWrappers()
+    {
+        string t = _m.SelfName;
+        L();
+        EmitWriteWrapper("SerializeWithTracker");
+        if (IsClass)
+        {
+            L();
+            EmitWriteWrapper("SerializeNonNull");
+        }
+        L();
+        EmitReadWrapper("DeserializeGuarded");
+        if (IsClass)
+        {
+            L();
+            EmitReadWrapper("DeserializeNonNull");
+        }
+
+        void EmitWriteWrapper(string name)
+        {
+            SignatureWrite(name);
+            Open("");
+            L($"{t}{(IsClass ? "?" : "")} __v = value;");
+            if (HasPreBlob)
+            {
+                L($"var __preBuffer = new {BlobWriter}();");
+                L($"var __pre = new global::MemoryPack.MemoryPackWriter<{BlobWriter}>(ref __preBuffer, null);");
+            }
+            foreach (var c in _m.OnSerializing) CallCallback(c, "__pre");
+            if (HasPreBlob)
+            {
+                L("__pre.Flush();");
+                L($"{Blob}.Write(ref writer, __preBuffer);");
+            }
+            L($"__ApexCore{name}(ref writer, in __v, ref tracker);");
+            if (HasPostBlob)
+            {
+                L($"var __postBuffer = new {BlobWriter}();");
+                L($"var __post = new global::MemoryPack.MemoryPackWriter<{BlobWriter}>(ref __postBuffer, null);");
+            }
+            foreach (var c in _m.OnSerialized) CallCallback(c, "__post");
+            if (HasPostBlob)
+            {
+                L("__post.Flush();");
+                L($"{Blob}.Write(ref writer, __postBuffer);");
+            }
+            Close();
+        }
+
+        void EmitReadWrapper(string name)
+        {
+            SignatureRead(name);
+            Open("");
+            L($"{t}{(IsClass ? "?" : "")} __v = default;");
+            if (HasPreBlob)
+            {
+                L($"var __pre = new global::MemoryPack.MemoryPackReader({Blob}.Read(ref reader), null);");
+            }
+            foreach (var c in _m.OnDeserializing.Where(c => c.IsStatic)) CallCallback(c, "__pre");
+            // コールバックが値を入れた場合、MemoryPack はその値へ上書きする。ApexPack はこの機能を持たない
+            if (IsClass) L($"if (__v is not null) {Blob}.ThrowOverwrite();");
+            L($"__ApexCore{name}(ref reader, out __v, ref tracker, ref guard);");
+            if (HasPostBlob)
+            {
+                L($"var __post = new global::MemoryPack.MemoryPackReader({Blob}.Read(ref reader), null);");
+            }
+            foreach (var c in _m.OnDeserialized) CallCallback(c, "__post");
+            L("value = __v;");
+            Close();
+        }
+    }
+
+    // ====================================================================
     // Collection
     // ====================================================================
 
@@ -287,7 +424,9 @@ internal sealed class CodeEmitter
         L($"int __n = {Ns}ApexSequence.ReadCount<TReader, TGuard, {e}, {f}>(ref reader, ref guard);");
         L("if (__n < 0) { value = default!; return; }");
         L($"var __c = new {t}();");
-        L($"for (int __i = 0; __i < __n; __i++) __c.Add({f}.Read(ref reader, ref tracker, ref guard));");
+        // ICollection<T>.Add を明示して呼ぶ(Dictionary の派生など、Add(T) が明示的実装の型があるため)
+        L($"var __ic = (global::System.Collections.Generic.ICollection<{e}>)__c;");
+        L($"for (int __i = 0; __i < __n; __i++) __ic.Add({f}.Read(ref reader, ref tracker, ref guard));");
         L("value = __c;");
         Close();
     }
@@ -392,8 +531,13 @@ internal sealed class CodeEmitter
 
         if (IsClass)
         {
-            SignatureWrite("SerializeWithTracker");
+            SignatureWrite(Entry("SerializeWithTracker"), access: EntryAccess);
             Open("");
+            if (_m.PreserveReferences)
+            {
+                // 参照保持の型は、追跡なしの文脈に置かれても自分の部分木で追跡を始める(読み取り側も同じ位置で始める)
+                L($"if (!TTracker.IsTrackingEnabled) {{ var __active = new {Ns}ActiveReferenceTracker(); try {{ {Entry("SerializeWithTracker")}(ref writer, in value, ref __active); }} finally {{ __active.Dispose(); }} return; }}");
+            }
             Open("if (TTracker.IsTrackingEnabled)");
             L($"if ({Ns}ApexReferenceHeader.Write(ref writer, value, ref tracker)) __ApexWriteBody(ref writer, value, ref tracker);");
             L("return;");
@@ -404,16 +548,27 @@ internal sealed class CodeEmitter
             Close();
             L();
 
-            SignatureWrite("SerializeNonNull");
+            SignatureWrite(Entry("SerializeNonNull"), access: EntryAccess);
             Open("");
-            L("if (TTracker.IsTrackingEnabled) { SerializeWithTracker(ref writer, in value, ref tracker); return; }");
-            L($"if (value is null) {Ns}ApexThrowHelper.ThrowNullNotAllowed(typeof({t}));");
-            L("__ApexWriteBody(ref writer, value, ref tracker);");
+            if (_m.PreserveReferences)
+            {
+                L($"{Entry("SerializeWithTracker")}(ref writer, in value, ref tracker);");
+            }
+            else
+            {
+                L($"if (TTracker.IsTrackingEnabled) {{ {Entry("SerializeWithTracker")}(ref writer, in value, ref tracker); return; }}");
+                L($"if (value is null) {Ns}ApexThrowHelper.ThrowNullNotAllowed(typeof({t}));");
+                L("__ApexWriteBody(ref writer, value, ref tracker);");
+            }
             Close();
             L();
 
-            SignatureRead("DeserializeGuarded");
+            SignatureRead(Entry("DeserializeGuarded"), EntryAccess);
             Open("");
+            if (_m.PreserveReferences)
+            {
+                L($"if (!TTracker.IsTrackingEnabled) {{ var __active = new {Ns}ActiveReferenceTracker(); try {{ {Entry("DeserializeGuarded")}(ref reader, out value, ref __active, ref guard); }} finally {{ __active.Dispose(); }} return; }}");
+            }
             Open("if (TTracker.IsTrackingEnabled)");
             L($"if ({Ns}ApexReferenceHeader.Read(ref reader, ref tracker, out uint __id, out object? __existing)) value = __ApexReadBody(ref reader, ref tracker, ref guard, __id, true);");
             L($"else value = ({t})__existing!;");
@@ -431,10 +586,17 @@ internal sealed class CodeEmitter
             Close();
             L();
 
-            SignatureRead("DeserializeNonNull");
+            SignatureRead(Entry("DeserializeNonNull"), EntryAccess);
             Open("");
-            L("if (TTracker.IsTrackingEnabled) { DeserializeGuarded(ref reader, out value, ref tracker, ref guard); return; }");
-            L("value = __ApexReadBody(ref reader, ref tracker, ref guard, 0, false);");
+            if (_m.PreserveReferences)
+            {
+                L($"{Entry("DeserializeGuarded")}(ref reader, out value, ref tracker, ref guard);");
+            }
+            else
+            {
+                L($"if (TTracker.IsTrackingEnabled) {{ {Entry("DeserializeGuarded")}(ref reader, out value, ref tracker, ref guard); return; }}");
+                L("value = __ApexReadBody(ref reader, ref tracker, ref guard, 0, false);");
+            }
             Close();
             L();
 
@@ -443,11 +605,11 @@ internal sealed class CodeEmitter
         else
         {
             L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
-            SignatureWrite("SerializeWithTracker");
+            SignatureWrite(Entry("SerializeWithTracker"), access: EntryAccess);
             L("    => __ApexWriteBody(ref writer, in value, ref tracker);");
             L();
             L("[global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
-            SignatureRead("DeserializeGuarded");
+            SignatureRead(Entry("DeserializeGuarded"), EntryAccess);
             L("    => value = __ApexReadBody(ref reader, ref tracker, ref guard, 0, false);");
             L();
             SignatureWrite("__ApexWriteBody", access: "private static ");
@@ -479,7 +641,12 @@ internal sealed class CodeEmitter
 
     private void EmitWriteBody()
     {
-        foreach (var c in _m.OnSerializing) L(c.IsStatic ? $"{c.Name}();" : $"value.{c.Name}();");
+        // 参照型のメンバーを持つクラスは循環し得る。参照保持なしの循環でスタックあふれ(プロセスが落ちる)にならないよう確かめる
+        if (IsClass && !_m.PreserveReferences && VariableMembers.Any(m => !m.Type.IsValueType && m.Type.SpecialType != SpecialType.System_String))
+        {
+            L($"{Ns}ApexRecursionGuard.EnsureStack(typeof({_m.SelfName}));");
+        }
+        if (!_m.IsCompat) foreach (var c in _m.OnSerializing) L(c.IsStatic ? $"{c.Name}();" : $"value.{c.Name}();");
 
         if (_m.Members.Count > 0 || _m.HasMarkerBit) L("bool __le = TWriter.IsHostLittleEndian;");
         foreach (var m in _m.Members)
@@ -552,7 +719,7 @@ internal sealed class CodeEmitter
             }
         }
 
-        foreach (var c in _m.OnSerialized) L(c.IsStatic ? $"{c.Name}();" : $"value.{c.Name}();");
+        if (!_m.IsCompat) foreach (var c in _m.OnSerialized) L(c.IsStatic ? $"{c.Name}();" : $"value.{c.Name}();");
     }
 
     private void EmitInlineWrite(MemberModel m)
@@ -572,14 +739,14 @@ internal sealed class CodeEmitter
     private void EmitReadBody()
     {
         string t = _m.SelfName;
-        foreach (var c in _m.OnDeserializing.Where(c => c.IsStatic)) L($"{c.Name}();");
+        if (!_m.IsCompat) foreach (var c in _m.OnDeserializing.Where(c => c.IsStatic)) L($"{c.Name}();");
         if (IsClass) L("guard.EnterDepth();");
 
         if (_m.CreateEarly)
         {
             L($"var __instance = new {t}();");
             L("if (TTracker.IsTrackingEnabled && __register) tracker.Register(__instance, __refId);");
-            foreach (var c in _m.OnDeserializing.Where(c => !c.IsStatic)) L($"__instance.{c.Name}();");
+            if (!_m.IsCompat) foreach (var c in _m.OnDeserializing.Where(c => !c.IsStatic)) L($"__instance.{c.Name}();");
         }
 
         if (_m.Members.Count > 0) L("bool __le = TReader.IsHostLittleEndian;");
@@ -654,7 +821,7 @@ internal sealed class CodeEmitter
             if (IsClass) L("if (TTracker.IsTrackingEnabled && __register) tracker.Register(__instance, __refId);");
         }
 
-        foreach (var c in _m.OnDeserialized) L(c.IsStatic ? $"{c.Name}();" : $"__instance.{c.Name}();");
+        if (!_m.IsCompat) foreach (var c in _m.OnDeserialized) L(c.IsStatic ? $"{c.Name}();" : $"__instance.{c.Name}();");
         if (IsClass) L("guard.ExitDepth();");
         L("return __instance;");
     }

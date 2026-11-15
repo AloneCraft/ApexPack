@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    MemoryPack 公式テストの比較。Upstream.OnMemoryPack と Upstream.OnApexPack を別プロセスで実行し(テスト DLL を harness 引数で起動)、
+    結果を突き合わせて分類する。コマンドラインからも、比較画面(benchmarks/ApexPack.BenchmarkGui)からも使う。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Upstream.Runner</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Upstream.Harness\HarnessResult.cs" Link="HarnessResult.cs" />
+  </ItemGroup>
+
+</Project>
