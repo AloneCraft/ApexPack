@@ -2,7 +2,7 @@
 
   <!-- アンロード可能性テスト用。テストからは collectible な AssemblyLoadContext に読み込むため、直接参照しない。 -->
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFrameworks>$(ApexPackTargetFrameworks)</TargetFrameworks>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

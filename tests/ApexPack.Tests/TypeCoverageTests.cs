@@ -67,6 +67,25 @@ public class TypeCoverageTests
     }
 
     [Fact]
+    public void BitArrayWireFormat()
+    {
+        var bits = new BitArray(new byte[] { 0x8D, 0xFF }) { Length = 9 };
+        byte[] expected = [10, 0x8D, 1];
+        Assert.Equal(expected, ApexPackSerializer.Serialize(bits));
+
+        var restored = ApexPackSerializer.Deserialize<BitArray>(new byte[] { 10, 0x8D, 0xFF });
+        Assert.Equal(bits.Cast<bool>(), restored.Cast<bool>());
+        restored.Length = 16;
+        Assert.All(restored.Cast<bool>().Skip(9), bit => Assert.False(bit));
+
+        Assert.Equal(new byte[] { 0 }, ApexPackSerializer.Serialize<BitArray?>(null));
+        Assert.Null(ApexPackSerializer.Deserialize<BitArray?>(new byte[] { 0 }));
+        Assert.Equal(new byte[] { 1 }, ApexPackSerializer.Serialize(new BitArray(0)));
+        Assert.Empty(ApexPackSerializer.Deserialize<BitArray>(new byte[] { 1 }).Cast<bool>());
+        Assert.Throws<ApexSecurityException>(() => ApexPackSerializer.Deserialize<BitArray>(new byte[] { 10, 0x8D }));
+    }
+
+    [Fact]
     public void Wrappers()
     {
         Same(new KeyValuePair<int, string>(1, "a"));
@@ -91,13 +110,28 @@ public class TypeCoverageTests
         Same(new ReadOnlySequence<int>(new[] { 5, 6 }), (a, b) => a.ToArray().SequenceEqual(b.ToArray()));
     }
 
+#if NET11_0_OR_GREATER
+    [Fact]
+    public void FullJoinResultsRoundTrip()
+    {
+        string[] outer = ["both", "outer"];
+        string[] inner = ["both", "inner"];
+        var joined = outer.FullJoin(inner, static value => value, static value => value);
+
+        var restored = Apex(joined);
+        (string?, string?)[] expected = [("both", "both"), ("outer", null), (null, "inner")];
+        Assert.Equal(expected, Assert.IsType<(string?, string?)[]>(restored));
+    }
+#endif
+
     [Fact]
     public void Collections()
     {
         Seq(new List<int> { 1, 2 }); Seq(new List<string?> { "a", null }); Seq(new List<int?> { 1, null });
         Seq(new LinkedList<int>(new[] { 1, 2 })); Seq(new Queue<int>(new[] { 1, 2 })); Seq(new Stack<int>(new[] { 1, 2, 3 }));
-        // Stack / Queue は借りた配列を経由して一括で読み書きする: 空、参照型、多い件数、内部の環状バッファが折り返した Queue
+        // 空、null 要素、Stack の読み取り経路の境界、環状バッファが折り返した Queue で順序を確認する。
         Seq(new Stack<int>()); Seq(new Queue<string?>()); Seq(new Stack<string?>(new[] { "a", null, "c" }));
+        Seq(new Stack<int>(Enumerable.Range(0, 8))); Seq(new Stack<int>(Enumerable.Range(0, 9)));
         Seq(new Stack<int>(Enumerable.Range(0, 1000))); Seq(new Queue<string>(Enumerable.Range(0, 300).Select(i => i.ToString())));
         var wrapped = new Queue<int>(8);
         for (int i = 0; i < 6; i++) wrapped.Enqueue(i);

@@ -106,7 +106,7 @@ public ref struct MemoryPackWriter<TBufferWriter> : IApexBufferWriter
     public void WriteValue<T>(scoped in T? value)
     {
         var tracker = new NullReferenceTracker();
-        ApexFormatterCache<T>.Instance.Write(ref this, in value!, ref tracker);
+        CachedFormatter<T>.Write(ref this, in value!, ref tracker);
     }
 
     /// <summary>既知のスカラー型(数値、enum、日時、Guid など)を正規形(リトルエンディアン)で書く。</summary>

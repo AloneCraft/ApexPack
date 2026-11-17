@@ -251,16 +251,35 @@ internal static class MultiDim
     public static Span<T> AsSpan<T>(Array array)
         => MemoryMarshal.CreateSpan(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetArrayDataReference(array)), array.Length);
 
+    public static int ExactSize<T, TF>(Array? value) where TF : IApexFormatter<T>
+    {
+        if (value is null) return 1;
+        int elementSize = TF.FixedSize;
+        if (elementSize < 0) return -1;
+
+        int size = checked(value.Length * elementSize + ApexWire.CompactSize((uint)value.GetLength(0) + 1));
+        for (int d = 1; d < value.Rank; d++)
+        {
+            size = checked(size + ApexWire.CompactSize((uint)value.GetLength(d)));
+        }
+        return size;
+    }
+
     public static void Write<TWriter, TTracker, T, TF>(ref TWriter writer, Array? value, ref TTracker tracker)
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
         where TF : IApexFormatter<T>
     {
         if (value is null) { writer.WriteNullCollectionHeader(); return; }
-        writer.WriteCompactUInt((uint)value.GetLength(0) + 1);
-        for (int d = 1; d < value.Rank; d++) writer.WriteCompactUInt((uint)value.GetLength(d));
+        WriteLength(ref writer, (uint)value.GetLength(0) + 1);
+        for (int d = 1; d < value.Rank; d++) WriteLength(ref writer, (uint)value.GetLength(d));
         ApexSequence.WriteElements<TWriter, TTracker, T, TF>(ref writer, AsSpan<T>(value), ref tracker);
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteLength<TWriter>(ref TWriter writer, uint length)
+        where TWriter : struct, IApexBufferWriter, allows ref struct
+        => ApexWire.WriteCompact(ref writer.GetSpanRef(ApexWire.CompactSize(length)), length, TWriter.IsHostLittleEndian);
 
     /// <summary>各次元の長さを読む。null なら false。</summary>
     public static bool ReadLengths<TReader, TGuard, T, TF>(ref TReader reader, ref TGuard guard, scoped Span<uint> lengths)
@@ -283,6 +302,8 @@ internal static class MultiDim
 
 public readonly struct Array2DFormatter<T, TF> : IApexFormatter<T[,]?> where TF : IApexFormatter<T>
 {
+    public static int ExactSize(scoped in T[,]? value) => MultiDim.ExactSize<T, TF>(value);
+
     public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in T[,]? value, ref TTracker tracker)
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
@@ -303,6 +324,8 @@ public readonly struct Array2DFormatter<T, TF> : IApexFormatter<T[,]?> where TF 
 
 public readonly struct Array3DFormatter<T, TF> : IApexFormatter<T[,,]?> where TF : IApexFormatter<T>
 {
+    public static int ExactSize(scoped in T[,,]? value) => MultiDim.ExactSize<T, TF>(value);
+
     public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in T[,,]? value, ref TTracker tracker)
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
@@ -323,6 +346,8 @@ public readonly struct Array3DFormatter<T, TF> : IApexFormatter<T[,,]?> where TF
 
 public readonly struct Array4DFormatter<T, TF> : IApexFormatter<T[,,,]?> where TF : IApexFormatter<T>
 {
+    public static int ExactSize(scoped in T[,,,]? value) => MultiDim.ExactSize<T, TF>(value);
+
     public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in T[,,,]? value, ref TTracker tracker)
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
@@ -603,6 +628,45 @@ public readonly struct BigIntegerFormatter : IApexFormatter<BigInteger>
 /// <summary>StringBuilder(文字列と同じ符号化)。</summary>
 public readonly struct StringBuilderFormatter : IApexFormatter<StringBuilder?>
 {
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static byte[]? TrySerializeLargeChunk(StringBuilder? value)
+        => value is { Length: >= 32768 } ? TrySerializeChunk(value) : null;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static byte[]? TrySerializeChunk(StringBuilder value)
+    {
+        // 大きな単一チャンクは文字の作業配列へ集約せずに書ける。
+        var chunks = value.GetChunks();
+        if (!chunks.MoveNext() || chunks.Current.Length != value.Length) return null;
+
+        ReadOnlySpan<char> chars = chunks.Current.Span;
+        if (!Ascii.IsValid(chars)) return SerializeChunk(chars);
+
+        // ASCII ならワイヤでの幅も確定するので、返す配列に直接書く。
+        uint header = ((uint)chars.Length << 1) + 1;
+        int headerSize = ApexWire.CompactSize(header);
+        var bytes = GC.AllocateUninitializedArray<byte>(checked(headerSize + chars.Length));
+        if (Ascii.FromUtf16(chars, bytes.AsSpan(headerSize), out _) != OperationStatus.Done) return null;
+        ApexWire.WriteCompact(ref bytes[0], header, BitConverter.IsLittleEndian);
+        return bytes;
+    }
+
+    private static byte[] SerializeChunk(ReadOnlySpan<char> chars)
+    {
+        var buffer = ApexThreadBuffer.Rent();
+        var writer = new ApexBufferWriter(buffer);
+        try
+        {
+            ApexStringCodec.WriteChars(ref writer, chars);
+            return writer.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+            ApexThreadBuffer.Return(buffer);
+        }
+    }
+
     public static void Write<TWriter, TTracker>(ref TWriter writer, scoped in StringBuilder? value, ref TTracker tracker)
         where TWriter : struct, IApexBufferWriter, allows ref struct
         where TTracker : IReferenceTracker, allows ref struct
@@ -728,10 +792,21 @@ public readonly struct BitArrayFormatter : IApexFormatter<BitArray?>
         if (value is null) { writer.WriteNullCollectionHeader(); return; }
         int length = value.Length;
         writer.WriteCollectionHeader(length);
-        int bytes = (length + 7) >> 3;
+        int bytes = (int)(((uint)length + 7) >> 3);
         if (bytes == 0) return;
+        int extraBits = length & 7;
+#if NET10_0_OR_GREATER
+        if (BitConverter.IsLittleEndian)
+        {
+            ref byte destination = ref writer.GetSpanRef(bytes);
+            CollectionsMarshal.AsBytes(value).CopyTo(MemoryMarshal.CreateSpan(ref destination, bytes));
+            // 元の BitArray は変更せず、書き込んだ末尾だけを正規化する。
+            if (extraBits != 0) Unsafe.Add(ref destination, bytes - 1) &= (byte)((1 << extraBits) - 1);
+            return;
+        }
+#endif
         // int 単位で写す(BitArray の内部と同じ単位なので速い)。LE 機では int 配列のバイト列がそのままワイヤの並びになる
-        int words = (length + 31) >> 5;
+        int words = (int)(((uint)length + 31) >> 5);
         int[] buffer = ArrayPool<int>.Shared.Rent(words);
         try
         {
@@ -742,7 +817,6 @@ public readonly struct BitArrayFormatter : IApexFormatter<BitArray?>
             }
             var span = MemoryMarshal.AsBytes(buffer.AsSpan(0, words)).Slice(0, bytes);
             // 長さを超えるビットは 0 にして書く(内部に残っていても同じバイト列になるように)
-            int extraBits = length & 7;
             if (extraBits != 0) span[bytes - 1] &= (byte)((1 << extraBits) - 1);
             writer.WriteRaw(span);
         }
@@ -762,8 +836,19 @@ public readonly struct BitArrayFormatter : IApexFormatter<BitArray?>
         uint length = header - 1;
         int bytes = (int)((length + 7) >> 3);
         if (length > int.MaxValue || bytes > reader.Remaining) ApexThrowHelper.ThrowInvalidLength((int)Math.Min(length, int.MaxValue));
-        // int 配列へ直接写して作る(一時の byte[] を作らない)。使わないビットは 0 のまま
         var source = reader.ReadRaw(bytes);
+#if NET10_0_OR_GREATER
+        if (BitConverter.IsLittleEndian)
+        {
+            var value = new BitArray((int)length);
+            var destination = CollectionsMarshal.AsBytes(value);
+            source.CopyTo(destination);
+            int extraBits = (int)(length & 7);
+            if (extraBits != 0) destination[^1] &= (byte)((1 << extraBits) - 1);
+            return value;
+        }
+#endif
+        // int 配列へ直接写して作る(一時の byte[] を作らない)。使わないビットは 0 のまま
         var words = new int[(int)((length + 31) >> 5)];
         source.CopyTo(MemoryMarshal.AsBytes(words.AsSpan()));
         if (!BitConverter.IsLittleEndian)

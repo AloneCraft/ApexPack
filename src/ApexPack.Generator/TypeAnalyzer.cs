@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace ApexPack.Generator;
 
@@ -145,6 +147,20 @@ internal sealed class TypeAnalyzer
             case "System.Numerics.Matrix4x4": return (64, true);
         }
         return null;
+    }
+
+    private static bool IsNet11PortableNumeric(ITypeSymbol type)
+    {
+        // 旧ジェネレーターが可変メンバー群に置いた型なので、ScalarInfo に足して並びを変えない。
+        if (type is INamedTypeSymbol named && named.OriginalDefinition.ToDisplayString() == "System.Numerics.Complex<T>")
+        {
+            type = named.TypeArguments[0];
+            if (type.SpecialType is SpecialType.System_Single or SpecialType.System_Double
+                || type.ToDisplayString() == "System.Half") return true;
+        }
+
+        return type.ToDisplayString() is "System.Numerics.BFloat16" or "System.Numerics.Decimal32"
+            or "System.Numerics.Decimal64" or "System.Numerics.Decimal128";
     }
 
     /// <summary>固定長で表せる型なら情報を返す(スカラー、またはこのコンパイル内の固定長 [ApexPackable] 構造体)。</summary>
@@ -318,7 +334,8 @@ internal sealed class TypeAnalyzer
 
         if (type.IsUnmanagedType && type.TypeKind == TypeKind.Struct)
         {
-            Report(Diagnostics.NonPortableStruct, diagnosticTarget, Name(type));
+            if (!IsNet11PortableNumeric(type))
+                Report(Diagnostics.NonPortableStruct, diagnosticTarget, Name(type));
             return $"{Ns}ScalarFormatter<{Name(type)}>";
         }
 
@@ -365,6 +382,7 @@ internal sealed class TypeAnalyzer
         {
             // 入れ子として解析しただけの型の診断は、その型自身の解析で出す
             _diagnostics.RemoveRange(diagnosticsBefore, _diagnostics.Count - diagnosticsBefore);
+            return model;
         }
         _cache[symbol] = model;
         return model;
@@ -372,6 +390,7 @@ internal sealed class TypeAnalyzer
 
     private TypeModel? AnalyzeCore(INamedTypeSymbol symbol)
     {
+        if (!ValidateApexAttributes(symbol)) return null;
         var attribute = GetPackableAttribute(symbol);
         var model = new TypeModel
         {
@@ -427,9 +446,16 @@ internal sealed class TypeAnalyzer
 
         if (model.IsInterface || model.IsAbstract)
         {
+            if (model.Kind == PackKind.Collection && attribute is not null && !model.IsCompat)
+            {
+                var syntax = attribute.ApplicationSyntaxReference?.GetSyntax() as AttributeSyntax;
+                var argument = syntax?.ArgumentList?.Arguments
+                    .FirstOrDefault(a => a.NameEquals?.Name.Identifier.ValueText == "GenerateType");
+                ReportAt(Diagnostics.UnionCollection, symbol, argument?.GetLocation() ?? syntax?.GetLocation(), symbol.Name);
+                return null;
+            }
             model.Kind = PackKind.Union;
-            AnalyzeUnion(model);
-            return model;
+            return AnalyzeUnion(model) ? model : null;
         }
 
         if (model.Kind == PackKind.Collection)
@@ -606,17 +632,30 @@ internal sealed class TypeAnalyzer
     internal static string EscapeIdentifier(string name)
         => Microsoft.CodeAnalysis.CSharp.SyntaxFacts.GetKeywordKind(name) != Microsoft.CodeAnalysis.CSharp.SyntaxKind.None ? "@" + name : name;
 
-    private void AnalyzeUnion(TypeModel model)
+    private bool AnalyzeUnion(TypeModel model)
     {
         var symbol = model.Symbol;
+        bool valid = true;
         foreach (var attr in symbol.GetAttributes().Where(a => Is(a, "ApexPack.ApexUnionAttribute")))
         {
-            if (attr.ConstructorArguments.Length != 2 || attr.ConstructorArguments[1].Value is not INamedTypeSymbol derived) continue;
+            if (attr.ConstructorArguments.Length != 2 || attr.ConstructorArguments[1].Value is not ITypeSymbol caseType) continue;
+            var derived = caseType as INamedTypeSymbol;
             // ジェネリックな基底型の case に開いたジェネリック(typeof(Case<>))を書いた場合は、基底型の型引数で閉じる
-            if (derived.IsUnboundGenericType && symbol.IsGenericType && derived.Arity == symbol.Arity)
+            if (derived is { IsUnboundGenericType: true } && symbol.IsGenericType && derived.Arity == symbol.Arity)
             {
                 derived = derived.ConstructedFrom.Construct(symbol.TypeArguments.ToArray());
             }
+            if (!IsCompat(attr) && caseType.TypeKind != TypeKind.Error && !IsUnionCase(derived, symbol))
+            {
+                var syntax = attr.ApplicationSyntaxReference?.GetSyntax() as AttributeSyntax;
+                var argument = syntax?.ArgumentList?.Arguments.Select(a => a.Expression)
+                    .FirstOrDefault(expression => expression is TypeOfExpressionSyntax);
+                ReportAt(Diagnostics.InvalidUnionCase, symbol, argument?.GetLocation() ?? syntax?.GetLocation(),
+                    caseType.ToDisplayString(), symbol.ToDisplayString());
+                valid = false;
+                continue;
+            }
+            if (derived is null) continue;
             ushort tag = Convert.ToUInt16(attr.ConstructorArguments[0].Value);
             if (model.UnionCases.Any(c => c.Tag == tag))
             {
@@ -628,6 +667,7 @@ internal sealed class TypeAnalyzer
             model.UnionCases.Add(new UnionCase { Tag = tag, TypeName = Name(derived), Depth = depth });
         }
 
+        if (!valid) return false;
         if (model.UnionCases.Count == 0)
         {
             Report(Diagnostics.UnionWithoutCases, symbol, symbol.Name);
@@ -635,6 +675,14 @@ internal sealed class TypeAnalyzer
 
         // 派生の深い型から照合する(基底型の case が派生型を先に捕まえないように)
         model.UnionCases = model.UnionCases.OrderByDescending(c => c.Depth).ThenBy(c => c.Tag).ToList();
+        return true;
+    }
+
+    private bool IsUnionCase(INamedTypeSymbol? derived, INamedTypeSymbol union)
+    {
+        if (derived is null || derived.IsUnboundGenericType) return false;
+        var conversion = _compilation.ClassifyConversion(derived, union);
+        return conversion.IsImplicit && (conversion.IsReference || conversion.IsBoxing) && !conversion.IsIdentity;
     }
 
     private bool AnalyzeCollection(TypeModel model)
@@ -979,6 +1027,52 @@ internal sealed class TypeAnalyzer
         return !element.IsValueType && element is not ITypeParameterSymbol && IsPackable(element);
     }
 
+    private bool ValidateApexAttributes(INamedTypeSymbol symbol)
+    {
+        int diagnosticsBefore = _diagnostics.Count;
+        bool constructorMarked = false;
+        foreach (var member in symbol.GetMembers())
+        {
+            if (member is IFieldSymbol or IPropertySymbol)
+            {
+                var include = GetNativeAttribute(member, "ApexPack.ApexIncludeAttribute");
+                if (include is not null && GetNativeAttribute(member, "ApexPack.ApexIgnoreAttribute") is not null)
+                {
+                    ReportAt(Diagnostics.ConflictingMemberAttributes, member,
+                        include.ApplicationSyntaxReference?.GetSyntax().GetLocation(), member.Name);
+                }
+            }
+            else if (member is IMethodSymbol method)
+            {
+                if (method.MethodKind == MethodKind.Constructor &&
+                    GetNativeAttribute(method, "ApexPack.ApexConstructorAttribute") is { } constructor)
+                {
+                    if (constructorMarked)
+                    {
+                        ReportAt(Diagnostics.MultipleApexConstructors, method,
+                            constructor.ApplicationSyntaxReference?.GetSyntax().GetLocation(), symbol.Name);
+                    }
+                    constructorMarked = true;
+                }
+                if (method.Parameters.Length == 0) continue;
+                foreach (var attribute in method.GetAttributes())
+                {
+                    if (attribute.AttributeClass?.ToDisplayString() is
+                        "ApexPack.ApexOnSerializingAttribute" or "ApexPack.ApexOnSerializedAttribute" or
+                        "ApexPack.ApexOnDeserializingAttribute" or "ApexPack.ApexOnDeserializedAttribute")
+                    {
+                        ReportAt(Diagnostics.CallbackHasParameters, method,
+                            attribute.ApplicationSyntaxReference?.GetSyntax().GetLocation(), method.Name);
+                    }
+                }
+            }
+        }
+        return diagnosticsBefore == _diagnostics.Count;
+    }
+
+    private static AttributeData? GetNativeAttribute(ISymbol symbol, string name)
+        => symbol.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == name);
+
     private void CollectCallbacks(TypeModel model)
     {
         foreach (var method in model.Symbol.GetMembers().OfType<IMethodSymbol>())
@@ -1006,8 +1100,11 @@ internal sealed class TypeAnalyzer
     }
 
     private void Report(DiagnosticDescriptor descriptor, ISymbol symbol, params object[] args)
+        => ReportAt(descriptor, symbol, null, args);
+
+    private void ReportAt(DiagnosticDescriptor descriptor, ISymbol symbol, Location? markedLocation, params object[] args)
     {
-        var location = symbol.Locations.FirstOrDefault(l => l.IsInSource) ?? Location.None;
+        var location = markedLocation ?? symbol.Locations.FirstOrDefault(l => l.IsInSource) ?? Location.None;
         _diagnostics.Add(Diagnostic.Create(descriptor, location, args));
     }
 }

@@ -2,6 +2,7 @@
 bin/
 obj/
 artifacts/
+/docs/_site/
 
 ## IDE and OS
 .vs/

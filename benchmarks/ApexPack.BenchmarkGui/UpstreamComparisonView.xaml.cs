@@ -153,6 +153,9 @@ public partial class UpstreamComparisonView : UserControl
     private void Show(ComparisonReport report)
     {
         _report = report;
+        int measuredCount = report.Rows.Count(r => r.IsMeasured);
+        TabMeasured.Header = $"比較できた項目 {measuredCount} 件";
+        TabUnmeasured.Header = $"比較できない項目 {report.Rows.Count - measuredCount} 件";
 
         PanelCounts.Children.Clear();
         foreach (var verdict in Verdicts.All)
@@ -194,16 +197,21 @@ public partial class UpstreamComparisonView : UserControl
 
     private void Filter_Changed(object sender, RoutedEventArgs e) => ApplyFilter();
 
+    private void MeasurementPages_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ReferenceEquals(e.Source, MeasurementPages)) ApplyFilter();
+    }
+
     private void ApplyFilter()
     {
-        if (_report is null || TxtRowCount is null) return;
+        if (_report is null || TxtRowCount is null || MeasurementPages is null) return;
         string verdict = CmbVerdict.SelectedItem as string ?? AllVerdicts;
         string search = TxtSearch.Text.Trim();
-        bool measuredOnly = ChkMeasuredOnly.IsChecked == true;
+        bool measured = MeasurementPages.SelectedIndex != 1;
         var rows = _report.Rows
             .Where(r => verdict == AllVerdicts || r.Verdict == verdict)
             .Where(r => search.Length == 0 || r.Id.Contains(search, StringComparison.OrdinalIgnoreCase) || r.Reason.Contains(search, StringComparison.OrdinalIgnoreCase))
-            .Where(r => !measuredOnly || r.SerializeSpeedup is not null || r.DeserializeSpeedup is not null || r.SizeRatio is not null)
+            .Where(r => r.IsMeasured == measured)
             .ToList();
         GridRows.ItemsSource = rows;
         TxtRowCount.Text = $"{rows.Count} / {_report.Rows.Count} 件";
@@ -215,6 +223,7 @@ public partial class UpstreamComparisonView : UserControl
         var sb = new StringBuilder();
         sb.AppendLine($"{row.Id}");
         sb.AppendLine($"判定: {row.Verdict}{(row.Reason.Length > 0 ? " — " + row.Reason : "")}");
+        sb.AppendLine($"計測: {row.MeasurementNote}");
         sb.AppendLine($"MemoryPack: {StatusTextConverter.Text(row.MemoryPackStatus)}{(row.MemoryPackError is null ? "" : " — " + row.MemoryPackError)}");
         sb.AppendLine($"ApexPack:   {StatusTextConverter.Text(row.ApexPackStatus)}{(row.ApexPackError is null ? "" : " — " + row.ApexPackError)}");
         sb.AppendLine();
@@ -245,8 +254,9 @@ public partial class UpstreamComparisonView : UserControl
     }
 
     /// <summary>確認用(画面の画像を保存するとき): テスト名で絞り込み、最初の行を選ぶ。</summary>
-    public void SelectForScreenshot(string search)
+    public void SelectForScreenshot(string search, bool unmeasured = false)
     {
+        MeasurementPages.SelectedIndex = unmeasured ? 1 : 0;
         TxtSearch.Text = search;
         ApplyFilter();
         if (GridRows.Items.Count > 0) GridRows.SelectedIndex = 0;

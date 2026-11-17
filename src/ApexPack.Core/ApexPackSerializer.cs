@@ -75,7 +75,11 @@ public static class ApexPackSerializer
 
     /// <summary>任意の型(コレクション、文字列、BCL 型など)を byte 配列にする。</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static byte[] Serialize<T>(T value)
+    public static byte[] Serialize<T>(T value) => SerializeByRef(in value);
+
+    /// <summary>任意の型を参照で受け取り、<see cref="Serialize{T}(T)"/> と同じ形式の byte 配列にする。</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static byte[] SerializeByRef<T>(scoped in T value)
     {
         // 固定長型は仮想呼び出しを通さずに書く(条件は型ごとの static readonly で、Tier1 では定数になる)。
         // 参照型は固定長にならないので調べない(参照型の共有コードでは static の参照ごとに実行時の検索が要るため)
@@ -86,14 +90,30 @@ public static class ApexPackSerializer
             if (fixedSize > 0)
             {
                 ref byte destination = ref MemoryMarshal.GetArrayDataReference(result);
-                if (ApexRootInfo<T>.IsRawLayout) Unsafe.WriteUnaligned(ref destination, value);
-                else if (ApexRootInfo<T>.RawPrefixSize == fixedSize) ApexWire.CopySmall(ref destination, ref Unsafe.As<T, byte>(ref value), fixedSize);
+                if (ApexRootInfo<T>.IsRawLayout || ApexRootInfo<T>.RawPrefixSize == fixedSize)
+                    ApexWire.CopySmall(ref destination, ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in value)), fixedSize);
                 else ApexFormatterCache<T>.Instance.WriteFixedRoot(ref destination, in value, BitConverter.IsLittleEndian);
             }
             return result;
         }
-        // 要素をメモリからそのまま書ける 1 次元配列(int[] など)は FormatterAdapter.SerializeToArray が直接書く
+        if (BitConverter.IsLittleEndian && typeof(T) == typeof(int[]) && Int32ArrayRoot.UsesDirectWriter)
+        {
+            return SerializeRawArray(Unsafe.As<T, int[]?>(ref Unsafe.AsRef(in value)), sizeof(int));
+        }
         return ApexFormatterCache<T>.Instance.SerializeToArray(in value);
+    }
+
+    private static class Int32ArrayRoot
+    {
+        public static readonly bool UsesDirectWriter;
+
+        static Int32ArrayRoot()
+        {
+            // int[] の経路に入るまで、既定または登録済みフォーマッタを確定しない。
+            UsesDirectWriter =
+                ApexFormatterCache<int[]?>.Instance is FormatterAdapter<int[]?, ArrayFormatter<int, ScalarFormatter<int>>>
+                    { PreserveReferences: false };
+        }
     }
 
     /// <summary>ArrayFormatter と同じ形式(CompactUInt(件数 + 1) + 要素、null は 0)を一度に書く。</summary>

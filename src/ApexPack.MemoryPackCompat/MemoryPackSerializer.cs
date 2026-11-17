@@ -24,7 +24,7 @@ public static class MemoryPackSerializer
         CheckOptions(options);
         try
         {
-            return ApexPackSerializer.Serialize<T>(value!);
+            return ApexPackSerializer.SerializeByRef<T>(in value!);
         }
         catch (Exception e) when (ShouldWrap(e))
         {

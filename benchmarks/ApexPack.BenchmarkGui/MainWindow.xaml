@@ -145,7 +145,7 @@
         <Border Grid.Row="4" Background="#11111B" CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
             <DockPanel>
                 <TextBlock x:Name="TxtStatus" Text="準備完了 — 「全ベンチマーク実行」をクリックして計測を開始してください。" FontSize="11" Foreground="#A6ADC8" DockPanel.Dock="Left"/>
-                <TextBlock Text=".NET 9.0 (win-x64) | Fused Block Span &amp; Single-VCall Active" FontSize="11" Foreground="#585B70" DockPanel.Dock="Right" HorizontalAlignment="Right"/>
+                <TextBlock x:Name="TxtRuntime" FontSize="11" Foreground="#585B70" DockPanel.Dock="Right" HorizontalAlignment="Right"/>
             </DockPanel>
         </Border>
     </Grid>

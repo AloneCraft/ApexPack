@@ -70,6 +70,7 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
     private int _bucketMask;
     private int _count;
     private uint _nextId;
+    private object? _firstReadObject;
     private object?[]? _idToObject;
     private uint _idLimit; // _idToObject に書いた最大 ID + 1(後始末で消す範囲)
 
@@ -77,15 +78,7 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
     // 書き込みは必ず TryGetReferenceId を先に呼ぶので、それで書き込み側と分かる。使わない側の表は作らない。
     private bool _writing;
 
-    public ActiveReferenceTracker()
-    {
-        // スレッドごとに使い回す小さな配列を借りる(共有プールの貸し借りと全体の消去を省く)
-        TrackerArrays.Rent(out _buckets, out _entries, out _idToObject);
-        _bucketMask = _buckets.Length - 1;
-        _count = 0;
-        _nextId = 0;
-        _idLimit = 0;
-    }
+    public ActiveReferenceTracker() => this = default;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint NextId() => _nextId++;
@@ -113,18 +106,17 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     public void Register(object obj, uint id)
     {
-        if (_buckets == null || _entries == null)
-        {
-            bool writing = _writing;
-            this = new ActiveReferenceTracker();
-            _writing = writing;
-        }
         if (!_writing)
         {
             RegisterForRead(obj, id);
             return;
         }
-        if (_count >= _entries!.Length || _count > _bucketMask)
+        if (_entries == null)
+        {
+            TrackerArrays.RentWrite(out _buckets, out _entries);
+            _bucketMask = _buckets.Length - 1;
+        }
+        if (_count >= _entries.Length || _count > _bucketMask)
         {
             Resize();
         }
@@ -140,7 +132,14 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     private void RegisterForRead(object obj, uint id)
     {
-        if (id >= _idToObject!.Length)
+        // 単一インスタンスの復元では作業配列を借りず、最初の後方参照も解決できる。
+        if (id == 0)
+        {
+            _firstReadObject = obj;
+            return;
+        }
+        _idToObject ??= TrackerArrays.RentIds();
+        if (id >= _idToObject.Length)
         {
             var newIdMap = new object?[(int)Math.Max((long)id * 2, 64)];
             Array.Copy(_idToObject, newIdMap, _idToObject.Length);
@@ -153,13 +152,13 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     public bool TryGetObject(uint id, out object? obj)
     {
-        if (_idToObject != null && id < _idToObject.Length && _idToObject[id] != null)
+        if (id == 0)
         {
-            obj = _idToObject[id];
-            return true;
+            obj = _firstReadObject;
+            return obj != null;
         }
-        obj = null;
-        return false;
+        obj = _idToObject != null && id < _idToObject.Length ? _idToObject[id] : null;
+        return obj != null;
     }
 
     private void Resize()
@@ -185,20 +184,24 @@ public struct ActiveReferenceTracker : IReferenceTracker, IDisposable
 
     public void Dispose()
     {
-        if (_buckets is null || _entries is null || _idToObject is null) return;
         // 使った範囲だけ消して返す(利用者のオブジェクトへの参照を残さない。アンロード可能性の不変条件)
-        Array.Clear(_entries, 0, _count);
-        Array.Fill(_buckets, -1);
-        Array.Clear(_idToObject, 0, (int)Math.Min(_idLimit, (uint)_idToObject.Length));
-        TrackerArrays.Return(_buckets, _entries, _idToObject);
-        _buckets = null;
-        _entries = null;
-        _idToObject = null;
+        if (_buckets != null && _entries != null)
+        {
+            Array.Clear(_entries, 0, _count);
+            Array.Fill(_buckets, -1);
+            TrackerArrays.ReturnWrite(_buckets, _entries);
+        }
+        if (_idToObject != null)
+        {
+            Array.Clear(_idToObject, 0, (int)Math.Min(_idLimit, (uint)_idToObject.Length));
+            TrackerArrays.ReturnIds(_idToObject);
+        }
+        this = default;
     }
 }
 
 /// <summary>
-/// 参照追跡の作業配列をスレッドごとに 1 組だけ使い回す。返すときは中身を消してあるので、利用者のオブジェクトは残らない。
+/// 参照追跡の作業配列を読み取り用と書き込み用に分け、スレッドごとに使い回す。返すときは中身を消してあるので、利用者のオブジェクトは残らない。
 /// 大きくなった配列は使い回さない(メモリを抱え込まないため)。
 /// </summary>
 internal static class TrackerArrays
@@ -210,22 +213,34 @@ internal static class TrackerArrays
     [ThreadStatic] private static ActiveReferenceTracker.Entry[]? t_entries;
     [ThreadStatic] private static object?[]? t_ids;
 
-    public static void Rent(out int[] buckets, out ActiveReferenceTracker.Entry[] entries, out object?[] ids)
+    public static void RentWrite(out int[] buckets, out ActiveReferenceTracker.Entry[] entries)
     {
         buckets = t_buckets ?? NewBuckets();
         entries = t_entries ?? new ActiveReferenceTracker.Entry[InitialCapacity];
-        ids = t_ids ?? new object?[InitialCapacity];
         t_buckets = null;
         t_entries = null;
-        t_ids = null;
     }
 
-    public static void Return(int[] buckets, ActiveReferenceTracker.Entry[] entries, object?[] ids)
+    public static void ReturnWrite(int[] buckets, ActiveReferenceTracker.Entry[] entries)
     {
-        if (buckets.Length <= MaxPooledCapacity && entries.Length <= MaxPooledCapacity && ids.Length <= MaxPooledCapacity)
+        if (buckets.Length <= MaxPooledCapacity && entries.Length <= MaxPooledCapacity)
         {
             t_buckets = buckets;
             t_entries = entries;
+        }
+    }
+
+    public static object?[] RentIds()
+    {
+        var ids = t_ids ?? new object?[InitialCapacity];
+        t_ids = null;
+        return ids;
+    }
+
+    public static void ReturnIds(object?[] ids)
+    {
+        if (ids.Length <= MaxPooledCapacity)
+        {
             t_ids = ids;
         }
     }
@@ -268,7 +283,7 @@ public static class ApexReferenceHeader
     }
 
     /// <summary>
-    /// ヘッダーを読む。新規インスタンスなら true を返し、<paramref name="newId"/> に予約した ID を入れる(本体読み取り後に Register する)。
+    /// ヘッダーを読む。新規インスタンスなら true を返し、<paramref name="newId"/> に予約した ID を入れる(本体を読む前に Register する)。
     /// null または後方参照なら false で、<paramref name="existing"/> に結果を入れる。
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

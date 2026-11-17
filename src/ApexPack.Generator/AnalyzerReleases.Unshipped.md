@@ -18,3 +18,9 @@ APX010 | ApexPack | Error | Invalid [ApexOrder]
 APX011 | ApexPack | Error | Duplicate union tag
 APX012 | ApexPack | Error | Invalid collection type
 APX013 | ApexPack | Error | Unsupported type
+APX014 | ApexPack | Error | Invalid [ApexUnion] target
+APX015 | ApexPack | Error | Conflicting member attributes
+APX016 | ApexPack | Error | Multiple [ApexConstructor] attributes
+APX017 | ApexPack | Error | ApexPack callback has parameters
+APX018 | ApexPack | Error | Union cannot use collection generation
+APX019 | ApexPack | Error | Invalid [ApexUnion] case

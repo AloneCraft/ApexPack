@@ -5,7 +5,7 @@
     取り込みが正しいことの基準であり、ApexPack 側(Upstream.OnApexPack)と比べる相手でもある。
   -->
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFrameworks>$(ApexPackTargetFrameworks)</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <!-- 上流の csproj と同じ条件にそろえる(暗黙の using は使わない) -->

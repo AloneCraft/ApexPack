@@ -25,8 +25,18 @@ public sealed class ComparisonRow
     public string? MemoryPackError { get; set; }
     public string? ApexPackError { get; set; }
 
-    /// <summary>計測した呼び出しの数(両側で同じときだけ速度・サイズを比べる)。</summary>
+    /// <summary>比較に使った呼び出しの数。</summary>
     public int Calls { get; set; }
+
+    public bool IsPartial => Calls > 0 && (Calls < MemoryPackCalls.Count || Calls < ApexPackCalls.Count);
+    public bool IsMeasured => MemoryPackBytes.HasValue && ApexPackBytes.HasValue;
+    public string MeasurementNote => IsMeasured
+        ? (IsPartial ? $"一部を比較 ({Calls}/{MemoryPackCalls.Count} 件)。再生できなかった呼び出しを除外" : "比較可能")
+        : Verdict is not (Verdicts.Match or Verdicts.Replaced) ? $"比較対象外: {Verdict} {Reason}"
+        : MemoryPackCalls.Count == 0 || ApexPackCalls.Count == 0 ? "記録された呼び出しがない"
+        : MemoryPackCalls.Count != ApexPackCalls.Count ? $"呼び出し件数が異なる (MP {MemoryPackCalls.Count} / Apex {ApexPackCalls.Count})"
+        : MemoryPackCalls.Zip(ApexPackCalls).Any(p => p.First.Op != p.Second.Op || p.First.Type != p.Second.Type) ? "呼び出しの種類または型が異なる"
+        : "再生可能な呼び出しがない";
 
     public double? MemoryPackSerializeNs { get; set; }
     public double? ApexPackSerializeNs { get; set; }
@@ -109,7 +119,11 @@ public sealed class ComparisonReport
     }
 
     public static ComparisonReport Load(string path)
-        => JsonSerializer.Deserialize<ComparisonReport>(File.ReadAllText(path)) ?? new ComparisonReport();
+    {
+        var report = JsonSerializer.Deserialize<ComparisonReport>(File.ReadAllText(path)) ?? new ComparisonReport();
+        foreach (var row in report.Rows) UpstreamComparison.FillMeasurements(row);
+        return report;
+    }
 
     public void Save(string path)
     {
@@ -135,8 +149,16 @@ public static class UpstreamComparison
         return null;
     }
 
+#if NET11_0
+    private const string TargetFramework = "net11.0";
+#elif NET10_0
+    private const string TargetFramework = "net10.0";
+#else
+    private const string TargetFramework = "net9.0";
+#endif
+
     public static string TestAssembly(string root, string project)
-        => Path.Combine(root, "tests", project, "bin", "Release", "net9.0", project + ".dll");
+        => Path.Combine(root, "tests", project, "bin", "Release", TargetFramework, project + ".dll");
 
     /// <summary>両側をビルドする(Release)。</summary>
     public static async Task BuildAsync(string root, IProgress<Progress>? progress, CancellationToken cancellationToken)
@@ -144,7 +166,7 @@ public static class UpstreamComparison
         foreach (var project in new[] { "Upstream.OnMemoryPack", "Upstream.OnApexPack" })
         {
             progress?.Report(new Progress("ビルド", 0, 0, project));
-            var (code, output) = await RunProcessAsync("dotnet", $"build \"{Path.Combine(root, "tests", project)}\" -c Release -nologo -v q", root, null, cancellationToken).ConfigureAwait(false);
+            var (code, output) = await RunProcessAsync("dotnet", $"build \"{Path.Combine(root, "tests", project)}\" -c Release -f {TargetFramework} -nologo -v q", root, null, cancellationToken).ConfigureAwait(false);
             if (code != 0) throw new InvalidOperationException($"{project} のビルドに失敗しました。\n{output}");
         }
     }
@@ -153,7 +175,7 @@ public static class UpstreamComparison
     public static async Task<ComparisonReport> RunAsync(string root, bool timing, string? filter, IProgress<Progress>? progress, CancellationToken cancellationToken)
     {
         // 中間の JSON はリポジトリ内の obj に置く(Git の対象外)
-        var work = Path.Combine(root, "tests", "Upstream.Runner", "obj", "harness");
+        var work = Path.Combine(root, "tests", "Upstream.Runner", "obj", "harness", TargetFramework);
         Directory.CreateDirectory(work);
         var mp = await RunSideAsync(root, "Upstream.OnMemoryPack", "MemoryPack", Path.Combine(work, "memorypack.json"), timing, filter, progress, cancellationToken).ConfigureAwait(false);
         var apex = await RunSideAsync(root, "Upstream.OnApexPack", "ApexPack", Path.Combine(work, "apexpack.json"), timing, filter, progress, cancellationToken).ConfigureAwait(false);
@@ -199,6 +221,19 @@ public static class UpstreamComparison
             Framework = apexPack.Framework,
             Timing = timing,
         };
+#if NET11_0_OR_GREATER
+        // ID が重複した場合は各ハーネスの最初の結果を使う。
+        report.Rows =
+        [
+            with(capacity: Math.Max(memoryPack.Tests.Count, apexPack.Tests.Count)),
+            .. memoryPack.Tests.DistinctBy(static test => test.Id)
+                .FullJoin(
+                    apexPack.Tests.DistinctBy(static test => test.Id),
+                    static test => test.Id,
+                    static test => test.Id,
+                    static (m, a) => Classify((m ?? a)!.Id, m, a)),
+        ];
+#else
         var apexById = apexPack.Tests.GroupBy(t => t.Id).ToDictionary(g => g.Key, g => g.First());
         var ids = memoryPack.Tests.Select(t => t.Id).Concat(apexPack.Tests.Select(t => t.Id)).Distinct().ToList();
         var mpById = memoryPack.Tests.GroupBy(t => t.Id).ToDictionary(g => g.Key, g => g.First());
@@ -209,6 +244,7 @@ public static class UpstreamComparison
             apexById.TryGetValue(id, out var a);
             report.Rows.Add(Classify(id, m, a));
         }
+#endif
         return report;
     }
 
@@ -287,15 +323,24 @@ public static class UpstreamComparison
         return row;
     }
 
-    /// <summary>両側で同じ数の呼び出しを測れたテストだけ、時間とサイズを合計して比べる。</summary>
-    private static void FillMeasurements(ComparisonRow row)
+    /// <summary>対応が確認できる呼び出しのうち、両側で再生できたものを比較する。</summary>
+    internal static void FillMeasurements(ComparisonRow row)
     {
         var m = row.MemoryPackCalls;
         var a = row.ApexPackCalls;
-        row.Calls = Math.Min(m.Count, a.Count);
+        row.Calls = 0;
+        row.MemoryPackBytes = row.ApexPackBytes = null;
+        row.MemoryPackSerializeNs = row.ApexPackSerializeNs = null;
+        row.MemoryPackDeserializeNs = row.ApexPackDeserializeNs = null;
         if (m.Count == 0 || m.Count != a.Count) return;
         if (row.Verdict is not (Verdicts.Match or Verdicts.Replaced)) return;
-        if (m.Any(c => c.ReplayError is not null) || a.Any(c => c.ReplayError is not null)) return;
+        var pairs = m.Zip(a).ToList();
+        if (pairs.Any(p => p.First.Op != p.Second.Op || p.First.Type != p.Second.Type)) return;
+        pairs = pairs.Where(p => p.First.ReplayError is null && p.Second.ReplayError is null).ToList();
+        if (pairs.Count == 0) return;
+        m = pairs.Select(p => p.First).ToList();
+        a = pairs.Select(p => p.Second).ToList();
+        row.Calls = pairs.Count;
 
         row.MemoryPackBytes = m.Sum(c => (long)c.Bytes);
         row.ApexPackBytes = a.Sum(c => (long)c.Bytes);

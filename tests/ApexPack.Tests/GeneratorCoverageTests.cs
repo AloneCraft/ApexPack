@@ -135,6 +135,14 @@ public class GeneratorCoverageTests
         var puppy = Assert.IsType<Puppy>(r);
         Assert.Equal(1, puppy.Age);
     }
+
+    [Fact]
+    public void GenericInterfaceUnion_ClosesTheSealedCase()
+    {
+        IGeneratorUnion<int> value = new GeneratorUnionCase<int> { Value = 42 };
+        var restored = Assert.IsType<GeneratorUnionCase<int>>(Roundtrip(value));
+        Assert.Equal(42, restored.Value);
+    }
 }
 
 [ApexPackable]
@@ -276,7 +284,19 @@ public partial class Dog : Animal
 }
 
 [ApexPackable]
-public partial class Puppy : Dog
+public sealed partial class Puppy : Dog
 {
     public int Age { get; set; }
+}
+
+[ApexPackable]
+[ApexUnion(0, typeof(GeneratorUnionCase<>))]
+public partial interface IGeneratorUnion<T>
+{
+}
+
+[ApexPackable]
+public sealed partial class GeneratorUnionCase<T> : IGeneratorUnion<T>
+{
+    public T? Value { get; set; }
 }

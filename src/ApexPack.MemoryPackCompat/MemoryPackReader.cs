@@ -175,7 +175,7 @@ public ref struct MemoryPackReader : IApexBufferReader, IDisposable
     {
         var tracker = new NullReferenceTracker();
         var guard = new TrustedSecurityGuard();
-        return ApexFormatterCache<T>.Instance.Read(ref this, ref tracker, ref guard);
+        return CachedFormatter<T>.Read(ref this, ref tracker, ref guard);
     }
 
     /// <summary>

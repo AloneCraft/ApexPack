@@ -10,7 +10,7 @@ namespace ApexPack.BenchmarkGui;
 public partial class App : Application
 {
     /// <summary>
-    /// 確認用: <c>--screenshot 出力.png [--tab 番号] [--search テスト名]</c> で起動すると、画面外に開いて描画結果を PNG に保存し、終了する
+    /// 確認用: <c>--screenshot 出力.png [--tab 番号] [--search テスト名] [--unmeasured]</c> で画面外の描画結果を保存する。
     /// (操作中の画面の前面に出さない)。
     /// </summary>
     protected override void OnStartup(StartupEventArgs e)
@@ -41,9 +41,9 @@ public partial class App : Application
         {
             tabs.SelectedIndex = tab;
             int searchIndex = Array.IndexOf(args, "--search");
-            if (searchIndex >= 0 && searchIndex + 1 < args.Length && ((TabItem)tabs.Items[tab]).Content is UpstreamComparisonView view)
+            if (((TabItem)tabs.Items[tab]).Content is UpstreamComparisonView view)
             {
-                view.SelectForScreenshot(args[searchIndex + 1]);
+                view.SelectForScreenshot(searchIndex >= 0 && searchIndex + 1 < args.Length ? args[searchIndex + 1] : "", args.Contains("--unmeasured"));
             }
         }
 

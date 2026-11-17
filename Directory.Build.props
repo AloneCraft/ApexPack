@@ -1,6 +1,15 @@
 <Project>
   <PropertyGroup>
+    <!-- Directory.Build.props is imported before the SDK sets NETCoreSdkVersion. -->
+    <ApexPackSdkVersion>$([System.IO.Path]::GetFileName($([System.IO.Path]::GetDirectoryName('$(MSBuildSDKsPath)'))))</ApexPackSdkVersion>
+    <ApexPackTargetFrameworks>net9.0</ApexPackTargetFrameworks>
+    <ApexPackTargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(ApexPackSdkVersion)', '10.0'))">net9.0;net10.0</ApexPackTargetFrameworks>
+    <ApexPackTargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(ApexPackSdkVersion)', '11.0'))">net9.0;net10.0;net11.0</ApexPackTargetFrameworks>
+    <ApexPackWindowsTargetFrameworks>net9.0-windows</ApexPackWindowsTargetFrameworks>
+    <ApexPackWindowsTargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(ApexPackSdkVersion)', '10.0'))">net9.0-windows;net10.0-windows</ApexPackWindowsTargetFrameworks>
+    <ApexPackWindowsTargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(ApexPackSdkVersion)', '11.0'))">net9.0-windows;net10.0-windows;net11.0-windows</ApexPackWindowsTargetFrameworks>
     <LangVersion>13.0</LangVersion>
+    <LangVersion Condition="'$(TargetFramework)' == 'net11.0' Or '$(TargetFramework)' == 'net11.0-windows'">15.0</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

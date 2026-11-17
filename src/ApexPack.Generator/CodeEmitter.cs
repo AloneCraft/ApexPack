@@ -170,9 +170,9 @@ internal sealed class CodeEmitter
         }
     }
 
-    private void SignatureWrite(string name, string valueModifier = "scoped in ", string access = "public static ")
+    private void SignatureWrite(string name, string valueModifier = "scoped in ", string access = "public static ", string extraParameters = "")
     {
-        L($"{access}void {name}<TWriter, TTracker>(ref TWriter writer, {valueModifier}{_m.SelfName} value, ref TTracker tracker)");
+        L($"{access}void {name}<TWriter, TTracker>(ref TWriter writer, {valueModifier}{_m.SelfName} value, ref TTracker tracker{extraParameters})");
         Raw(Indent(WriterConstraints));
     }
 
@@ -615,6 +615,17 @@ internal sealed class CodeEmitter
             L($"public static int ApexExactSize(scoped in {t} value) => {exact};");
             L();
         }
+        else if (TryGetRuntimeSizedMember() is { } runtimeSizedMember)
+        {
+            int prefixSize = _m.MaskBytes + _m.FixedBytes + (_m.HasMarkerBit ? 0 : 1);
+            Open($"public static int ApexExactSize(scoped in {t} value)");
+            L("if (value is null) return 1;");
+            L($"if (!typeof({runtimeSizedMember.TypeName}).IsValueType) return -1;");
+            L($"int size = {Ns}CachedFormatter<{runtimeSizedMember.TypeName}>.FixedSize;");
+            L($"return (uint)size <= int.MaxValue - {prefixSize} ? size + {prefixSize} : -1;");
+            Close();
+            L();
+        }
 
         if (IsClass)
         {
@@ -630,8 +641,15 @@ internal sealed class CodeEmitter
             L("return;");
             Close();
             L($"if (value is null) {{ {Ext}.WriteByte(ref writer, 0); return; }}");
-            if (!_m.HasMarkerBit) L($"{Ext}.WriteByte(ref writer, 1);");
-            L("__ApexWriteBody(ref writer, value, ref tracker);");
+            if (FuseFixedClassMarker)
+            {
+                L("__ApexWriteBody(ref writer, value, ref tracker, 1);");
+            }
+            else
+            {
+                if (!_m.HasMarkerBit) L($"{Ext}.WriteByte(ref writer, 1);");
+                L("__ApexWriteBody(ref writer, value, ref tracker);");
+            }
             Close();
             L();
 
@@ -687,7 +705,8 @@ internal sealed class CodeEmitter
             Close();
             L();
 
-            SignatureWrite("__ApexWriteBody", valueModifier: "", access: "private static ");
+            SignatureWrite("__ApexWriteBody", valueModifier: "", access: "private static ",
+                extraParameters: FuseFixedClassMarker ? ", int __markerBytes = 0" : "");
         }
         else if (_m.ConditionalFixed)
         {
@@ -914,6 +933,23 @@ internal sealed class CodeEmitter
     /// <summary>書くバイト数が値によらず決まり、ApexExactSize を出す型(Object 種別)。</summary>
     private bool HasExactSize => _m.Kind == PackKind.Object && !WrapCallbacks && !_m.ConditionalFixed && !VariableMembers.Any() && !NullableFixedMembers.Any();
 
+    private bool FuseFixedClassMarker => IsClass && HasExactSize && !_m.HasMarkerBit && _m.FixedBytes > 0
+        && !_m.PreserveReferences && !HasAnyCallback;
+
+    private MemberModel? TryGetRuntimeSizedMember()
+    {
+        if (!IsClass || _m.PreserveReferences || HasAnyCallback || _m.Members.Count != 1) return null;
+        var member = _m.Members[0];
+        if (member.Encoding != MemberEncoding.Variable || member.Type is not ITypeParameterSymbol
+            || member.Formatter != $"{Ns}CachedFormatter<{member.TypeName}>") return null;
+        // ユーザー定義の getter がフォーマッタを初回登録する場合は、その前に解決しない。
+        return member.Symbol is IFieldSymbol
+            || member.Symbol is IPropertySymbol { IsVirtual: false, IsOverride: false }
+                && member.Symbol.ContainingType.GetMembers().OfType<IFieldSymbol>()
+                    .Any(field => SymbolEqualityComparer.Default.Equals(field.AssociatedSymbol, member.Symbol))
+            ? member : null;
+    }
+
     /// <summary>
     /// 型を具体的に書いたルート用フォーマッタ。参照型の FormatterAdapter / PackableFormatter は共有ジェネリックコードになり、
     /// T の静的メソッドを呼ぶたびに実行時の検索が入る。ここでは自分の型の静的メソッドを直接呼ぶ。
@@ -1050,7 +1086,17 @@ internal sealed class CodeEmitter
         int region = _m.MaskBytes + _m.FixedBytes + _m.NullableFixedMaxBytes;
         if (region > 0)
         {
-            L($"ref byte __p = ref writer.Reserve({region});");
+            if (FuseFixedClassMarker)
+            {
+                // 追跡なしの nullable 入口だけが非 null 印を本体と一緒に書く。
+                L($"ref byte __start = ref writer.Reserve({region} + __markerBytes);");
+                L("if (__markerBytes != 0) __start = 1;");
+                L($"ref byte __p = ref {Un}.Add(ref __start, __markerBytes);");
+            }
+            else
+            {
+                L($"ref byte __p = ref writer.Reserve({region});");
+            }
             for (int b = 0; b < _m.MaskBytes; b++)
             {
                 L($"{Un}.Add(ref __p, {b}) = (byte)(__mask{b / 8} >> {(b % 8) * 8});");
@@ -1097,7 +1143,8 @@ internal sealed class CodeEmitter
             }
             else
             {
-                L($"writer.Advance({offset});");
+                string advance = FuseFixedClassMarker ? $"{offset} + __markerBytes" : offset.ToString();
+                L($"writer.Advance({advance});");
             }
         }
 
@@ -1283,7 +1330,9 @@ internal sealed class CodeEmitter
         else
         {
             L($"var __a = __n == 0 ? global::System.Array.Empty<{e}>() : new {e}[__n];");
-            L($"for (int __i = 0; __i < __a.Length; __i++) __a[__i] = {m.Formatter}.Read(ref reader, ref tracker, ref guard);");
+            // ここで確保した配列の要素型は正確に分かるので、代入ごとの共変配列チェックは不要。
+            L("ref var __first = ref global::System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(__a);");
+            L($"for (int __i = 0; __i < __a.Length; __i++) {Un}.Add(ref __first, __i) = {m.Formatter}.Read(ref reader, ref tracker, ref guard);");
             L($"{m.Local} = __a;");
         }
         Close();

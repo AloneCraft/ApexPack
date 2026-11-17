@@ -239,6 +239,25 @@ public class RuntimeRegistrationTests
         Assert.Null(ApexPackSerializer.Deserialize<FrozenSet<int>?>(ApexPackSerializer.Serialize<FrozenSet<int>?>(null)));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(8)]
+    [InlineData(9)]
+    public void FrozenSet_FromCollectionWireFormat_HandlesDuplicatesAndNull(int count)
+    {
+        var elements = new string?[count];
+        for (int i = 1; i < count; i += 2)
+        {
+            elements[i] = "item";
+        }
+
+        byte[] bytes = ApexPackSerializer.Serialize(elements);
+        var result = ApexPackSerializer.Deserialize<FrozenSet<string?>>(bytes);
+
+        Assert.True(result.SetEquals(elements));
+        Assert.Equal(count == 0 ? 0 : 2, result.Count);
+    }
+
     [Fact]
     public async Task DeserializeAsync_MemoryStream_AdvancesByConsumedBytes()
     {

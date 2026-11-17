@@ -349,6 +349,12 @@ public sealed class FormatterAdapter<T, TFormatter> : ApexFormatter<T>
             return result;
         }
 
+        if (typeof(TFormatter) == typeof(StringBuilderFormatter)
+            && StringBuilderFormatter.TrySerializeLargeChunk(Unsafe.As<T, System.Text.StringBuilder?>(ref Unsafe.AsRef(in value))) is { } chunkBytes)
+        {
+            return chunkBytes;
+        }
+
         var buffer = ApexThreadBuffer.Rent();
         var writer = new ApexBufferWriter(buffer);
         try

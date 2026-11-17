@@ -58,6 +58,14 @@ def pooled_r(build, reverse=False):
     lines = [
         COUNT_R,
         "if (count < 0) return null;",
+    ]
+    if reverse:
+        lines += [
+            "if (count == 0) return new Stack<T>();",
+            f"if (count <= {SEQ}.SmallCollectionCapacity && global::System.Runtime.CompilerServices.Unsafe.SizeOf<T>() <= 32)",
+            f"    return {SEQ}.ReadSmallStack<TReader, TTracker, TGuard, T, TF>(ref reader, count, ref tracker, ref guard);",
+        ]
+    lines += [
         "T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);",
         "try",
         "{",
@@ -174,7 +182,13 @@ SPECS = [
      [f"var array = {READ_ARR};", "if (array is null) return null;", "Array.Reverse(array);", "return ImmutableStack.Create<T>(array);"]),
     ("ImmutableSetInterfaceFormatter", E, EC, "IImmutableSet<T>?", "IImmutableSet&lt;T&gt;(ImmutableHashSet として復元)", [ENUM_W], arr_r("ImmutableHashSet.Create<T>(array)")),
     # ---- frozen ----
-    ("FrozenSetFormatter", E, EC, "FrozenSet<T>?", "FrozenSet&lt;T&gt;", [NULL_W, span_w("value.Items.AsSpan()")], arr_r("FrozenSet.ToFrozenSet<T>(array)")),
+    ("FrozenSetFormatter", E, EC, "FrozenSet<T>?", "FrozenSet&lt;T&gt;", [NULL_W, span_w("value.Items.AsSpan()")],
+     [COUNT_R, "if (count < 0) return null;", "if (count == 0) return FrozenSet<T>.Empty;",
+      f"if (count <= {SEQ}.SmallCollectionCapacity && global::System.Runtime.CompilerServices.Unsafe.SizeOf<T>() <= 32)",
+      f"    return {SEQ}.ReadSmallFrozenSet<TReader, TTracker, TGuard, T, TF>(ref reader, count, ref tracker, ref guard);",
+      f"var array = {SEQ}.AllocateArray<T, TF>(count);",
+      f"{SEQ}.ReadElements<TReader, TTracker, TGuard, T, TF>(ref reader, array, ref tracker, ref guard);",
+      "return FrozenSet.ToFrozenSet<T>(array);"]),
     # ---- dictionaries ----
     ("DictionaryFormatter", DK, DC, "Dictionary<TKey, TValue>?", "Dictionary&lt;TKey, TValue&gt;", dict_w(), dict_r("new Dictionary<TKey, TValue>(count)", "dictionary.Add(key, item)")),
     ("SortedDictionaryFormatter", DK, DC, "SortedDictionary<TKey, TValue>?", "SortedDictionary&lt;TKey, TValue&gt;", dict_w(), dict_r("new SortedDictionary<TKey, TValue>()", "dictionary.Add(key, item)")),

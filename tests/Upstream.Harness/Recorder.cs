@@ -352,7 +352,7 @@ internal static class Direct
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
     public static byte[] Serialize<T>(in T? value, Options? options)
 #if APEXPACK_BACKEND
-        => global::ApexPack.ApexPackSerializer.Serialize<T>(value!);
+        => global::ApexPack.ApexPackSerializer.SerializeByRef<T>(in value!);
 #else
         => Backend.Serialize(in value, options);
 #endif

@@ -25,7 +25,7 @@ public static class ApexWire
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int CompactSize(uint value) => value <= CompactOneByteMax ? 1 : value <= ushort.MaxValue ? 3 : 5;
 
-    /// <summary>CompactUInt を書き、使ったバイト数を返す。<paramref name="p"/> から 5 バイトが書き込み可能であること。</summary>
+    /// <summary>CompactUInt を書き、使ったバイト数を返す。<paramref name="p"/> から <see cref="CompactSize"/> バイトを書き込めること。</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int WriteCompact(ref byte p, uint value, bool le)
     {
@@ -232,6 +232,16 @@ public static class ApexWire
     private static int ComponentSize<T>() where T : unmanaged
     {
         if (typeof(T) == typeof(Complex)) return 8;
+#if NET11_0_OR_GREATER
+        // 複素数は実部・虚部を別々に、10進浮動小数は BID 全体を反転する。
+        if (typeof(T) == typeof(BFloat16)
+            || typeof(T) == typeof(Complex<Half>) || typeof(T) == typeof(Complex<BFloat16>)) return 2;
+        if (typeof(T) == typeof(Decimal32)
+            || typeof(T) == typeof(Complex<float>) || typeof(T) == typeof(Complex<Decimal32>)) return 4;
+        if (typeof(T) == typeof(Decimal64)
+            || typeof(T) == typeof(Complex<double>) || typeof(T) == typeof(Complex<Decimal64>)) return 8;
+        if (typeof(T) == typeof(Decimal128) || typeof(T) == typeof(Complex<Decimal128>)) return 16;
+#endif
         if (typeof(T) == typeof(Vector2) || typeof(T) == typeof(Vector3) || typeof(T) == typeof(Vector4)
             || typeof(T) == typeof(Quaternion) || typeof(T) == typeof(Plane)
             || typeof(T) == typeof(Matrix3x2) || typeof(T) == typeof(Matrix4x4))
@@ -253,9 +263,44 @@ public static class ApexWire
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static T ReadPrefix<T>(ref readonly byte source, int size)
     {
+        // 末尾の 4 バイトが詰め物なら、必要なバイトだけ読み、残りをゼロにした値を直接返す。
+        if (BitConverter.IsLittleEndian && !RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+        {
+            ref byte bytes = ref Unsafe.AsRef(in source);
+            if (size == 12 && Unsafe.SizeOf<T>() == 16 && Vector128.IsHardwareAccelerated)
+            {
+                var bits = Vector128.Create(Unsafe.ReadUnaligned<ulong>(ref bytes),
+                    (ulong)Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref bytes, 8)));
+                return Unsafe.BitCast<Vector128<ulong>, T>(bits);
+            }
+            if (size == 20 && Unsafe.SizeOf<T>() == 24)
+            {
+                var bits = new Prefix24(
+                    Unsafe.ReadUnaligned<ulong>(ref bytes),
+                    Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bytes, 8)),
+                    Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref bytes, 16)));
+                return Unsafe.BitCast<Prefix24, T>(bits);
+            }
+            if (size == 28 && Unsafe.SizeOf<T>() == 32 && Vector256.IsHardwareAccelerated)
+            {
+                var lower = Unsafe.ReadUnaligned<Vector128<ulong>>(ref bytes);
+                var upper = Vector128.Create(Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bytes, 16)),
+                    (ulong)Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref bytes, 24)));
+                return Unsafe.BitCast<Vector256<ulong>, T>(Vector256.Create(lower, upper));
+            }
+        }
+
         T value = default!;
         CopySmall(ref Unsafe.As<T, byte>(ref value), ref Unsafe.AsRef(in source), size);
         return value;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct Prefix24(ulong first, ulong second, ulong third)
+    {
+        private readonly ulong _first = first;
+        private readonly ulong _second = second;
+        private readonly ulong _third = third;
     }
 
     /// <summary>
@@ -338,6 +383,20 @@ public static class ApexWire
         int i = 0;
         if (Vector128.IsHardwareAccelerated && size >= 8 && size <= 16 && stride >= 16)
         {
+            if (size == 12 && stride == 16)
+            {
+                // 4要素ずつ進み、重複して読む4バイトが入力範囲に収まるよう末尾を残す。
+                while (count > 4)
+                {
+                    Vector128.LoadUnsafe(ref source).StoreUnsafe(ref destination);
+                    Vector128.LoadUnsafe(ref source, 12).StoreUnsafe(ref destination, 16);
+                    Vector128.LoadUnsafe(ref source, 24).StoreUnsafe(ref destination, 32);
+                    Vector128.LoadUnsafe(ref source, 36).StoreUnsafe(ref destination, 48);
+                    source = ref Unsafe.Add(ref source, 48);
+                    destination = ref Unsafe.Add(ref destination, 64);
+                    count -= 4;
+                }
+            }
             for (; i < count - 1; i++)
             {
                 Vector128.LoadUnsafe(ref source, (nuint)(i * size)).StoreUnsafe(ref destination, (nuint)(i * stride));

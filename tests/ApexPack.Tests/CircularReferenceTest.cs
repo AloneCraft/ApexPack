@@ -40,4 +40,40 @@ public class CircularReferenceTest
         // Identity preserved!
         Assert.Same(restoredA, restoredA.Next.Next);
     }
+
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(40, 35)]
+    public void CircularReference_ResolvesBackReferenceAcrossTrackerCapacity(int count, int backReference)
+    {
+        var nodes = new Node[count];
+        for (int i = 0; i < nodes.Length; i++)
+        {
+            nodes[i] = new Node { Value = i };
+            if (i > 0) nodes[i - 1].Next = nodes[i];
+        }
+        nodes[^1].Next = nodes[backReference];
+
+        byte[] bytes = ApexPackSerializer.SerializeWithReferences(nodes[0]);
+        Node? current = ApexPackSerializer.DeserializeWithReferences<Node>(bytes);
+
+        Node? expectedReference = null;
+        for (int i = 0; i < count; i++)
+        {
+            Assert.NotNull(current);
+            Assert.Equal(i, current.Value);
+            if (i == backReference) expectedReference = current;
+            current = current.Next;
+        }
+        Assert.Same(expectedReference, current);
+    }
+
+    [Theory]
+    [InlineData((byte)2)]
+    [InlineData((byte)3)]
+    public void CircularReference_RejectsBackReferenceBeforeRegistration(byte header)
+    {
+        byte[] bytes = [header];
+        Assert.Throws<InvalidOperationException>(() => ApexPackSerializer.DeserializeWithReferences<Node>(bytes));
+    }
 }

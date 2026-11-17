@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -169,6 +170,13 @@ public static class ApexSequence
     {
         int count = ReadCount<TReader, TGuard, T, TFormatter>(ref reader, ref guard);
         if (count < 0) return null;
+        if (count == 1 && !typeof(T).IsValueType && TFormatter.FixedSize < 0)
+        {
+            var single = new T[1];
+            // ここで確保した正確な型の配列へ書くため、共変配列の型チェックは不要。
+            MemoryMarshal.GetArrayDataReference(single) = TFormatter.Read(ref reader, ref tracker, ref guard);
+            return single;
+        }
         var array = AllocateArray<T, TFormatter>(count);
         ReadElements<TReader, TTracker, TGuard, T, TFormatter>(ref reader, array, ref tracker, ref guard);
         return array;
@@ -187,6 +195,47 @@ public static class ApexSequence
         CollectionsMarshal.SetCount(list, count);
         ReadElements<TReader, TTracker, TGuard, T, TFormatter>(ref reader, CollectionsMarshal.AsSpan(list), ref tracker, ref guard);
         return list;
+    }
+
+    internal const int SmallCollectionCapacity = 8;
+
+    [InlineArray(SmallCollectionCapacity)]
+    private struct SmallCollectionBuffer<T>
+    {
+        private T _first;
+    }
+
+    // 大きな構造体の読み取り経路に、一時領域のスタック確保を持ち込まない。
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static Stack<T> ReadSmallStack<TReader, TTracker, TGuard, T, TFormatter>(ref TReader reader, int count, ref TTracker tracker, ref TGuard guard)
+        where TReader : struct, IApexBufferReader, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+        where TGuard : ISecurityGuard, allows ref struct
+        where TFormatter : IApexFormatter<T>
+    {
+        SmallCollectionBuffer<T> buffer = default;
+        Span<T> elements = buffer[..count];
+        ReadElements<TReader, TTracker, TGuard, T, TFormatter>(ref reader, elements, ref tracker, ref guard);
+
+        var stack = new Stack<T>(count);
+        for (int i = elements.Length - 1; i >= 0; i--)
+        {
+            stack.Push(elements[i]);
+        }
+        return stack;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static FrozenSet<T> ReadSmallFrozenSet<TReader, TTracker, TGuard, T, TFormatter>(ref TReader reader, int count, ref TTracker tracker, ref TGuard guard)
+        where TReader : struct, IApexBufferReader, allows ref struct
+        where TTracker : IReferenceTracker, allows ref struct
+        where TGuard : ISecurityGuard, allows ref struct
+        where TFormatter : IApexFormatter<T>
+    {
+        SmallCollectionBuffer<T> buffer = default;
+        Span<T> elements = buffer[..count];
+        ReadElements<TReader, TTracker, TGuard, T, TFormatter>(ref reader, elements, ref tracker, ref guard);
+        return FrozenSet.Create<T>(elements);
     }
 
     /// <summary>件数が既知の列挙を書く(件数とは別に要素数が食い違えば例外)。</summary>

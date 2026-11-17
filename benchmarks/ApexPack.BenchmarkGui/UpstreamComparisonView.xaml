@@ -39,6 +39,35 @@
             <Setter Property="Foreground" Value="#6C7086"/>
             <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
+        <Style x:Key="MeasurementTab" TargetType="TabItem">
+            <Setter Property="Foreground" Value="#F9E2AF"/>
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="TabBorder" Background="{TemplateBinding Background}" BorderBrush="#6C7086"
+                                BorderThickness="1" CornerRadius="5" Padding="12,8">
+                            <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="#A6E3A1"/>
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#A6E3A1"/>
+                                <Setter Property="Foreground" Value="#11111B"/>
+                                <Setter Property="FontWeight" Value="Bold"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#89B4FA"/>
+                                <Setter TargetName="TabBorder" Property="BorderThickness" Value="2"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
 
     <Grid Margin="16">
@@ -133,7 +162,16 @@
             <ComboBox x:Name="CmbVerdict" Width="170" SelectionChanged="Filter_Changed"/>
             <TextBlock Text="テスト名" VerticalAlignment="Center" Margin="16,0,6,0"/>
             <TextBox x:Name="TxtSearch" Width="260" Background="#181825" Foreground="#CDD6F4" BorderBrush="#45475A" TextChanged="Filter_Changed"/>
-            <CheckBox x:Name="ChkMeasuredOnly" Content="比べられたものだけ" Foreground="#CDD6F4" VerticalAlignment="Center" Margin="16,0,0,0" Checked="Filter_Changed" Unchecked="Filter_Changed"/>
+            <TabControl x:Name="MeasurementPages" Margin="16,0,0,0" VerticalAlignment="Center" SelectionChanged="MeasurementPages_SelectionChanged"
+                        ToolTip="件数は絞り込み前の全テスト数です。クリックで一覧を切り替えます。">
+                <TabControl.Template>
+                    <ControlTemplate TargetType="TabControl">
+                        <TabPanel IsItemsHost="True"/>
+                    </ControlTemplate>
+                </TabControl.Template>
+                <TabItem x:Name="TabMeasured" Style="{StaticResource MeasurementTab}" Header="比較できた項目 —"/>
+                <TabItem x:Name="TabUnmeasured" Style="{StaticResource MeasurementTab}" Header="比較できない項目 —"/>
+            </TabControl>
             <TextBlock x:Name="TxtRowCount" VerticalAlignment="Center" Margin="16,0,0,0" Foreground="#6C7086"/>
         </StackPanel>
 
@@ -175,6 +213,7 @@
                     <DataGridTextColumn Header="MP" Binding="{Binding MemoryPackStatus, Converter={StaticResource StatusText}}" Width="50"/>
                     <DataGridTextColumn Header="Apex" Binding="{Binding ApexPackStatus, Converter={StaticResource StatusText}}" Width="50"/>
                     <DataGridTextColumn Header="呼出" Binding="{Binding Calls}" Width="45"/>
+                    <DataGridTextColumn Header="計測状況・理由" Binding="{Binding MeasurementNote}" Width="250"/>
                     <DataGridTextColumn Header="MP 直列化" Binding="{Binding MemoryPackSerializeNs, StringFormat={}{0:N1} ns, TargetNullValue=''}" Width="95"/>
                     <DataGridTextColumn Header="Apex 直列化" Binding="{Binding ApexPackSerializeNs, StringFormat={}{0:N1} ns, TargetNullValue=''}" Width="95"/>
                     <DataGridTemplateColumn Header="倍率" Width="60" SortMemberPath="SerializeSpeedup">

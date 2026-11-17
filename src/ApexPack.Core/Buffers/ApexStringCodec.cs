@@ -121,13 +121,18 @@ public static class ApexStringCodec
         {
             if (length > (uint)reader.Remaining) ApexThrowHelper.ThrowInvalidLength((int)Math.Min(length, int.MaxValue));
             var bytes = MemoryMarshal.CreateReadOnlySpan(in reader.GetSpanRef((int)length), (int)length);
-            var builder = new System.Text.StringBuilder((int)length);
+            // 大きい入力では小さなチャンクを増やす。先頭に余りを含め、末尾の再確保を抑える。
+            const int chunkCapacity = 8_000;
+            int initialCapacity = length < 42_000 ? (int)length : chunkCapacity + (int)(length % chunkCapacity);
+            var builder = new StringBuilder(initialCapacity);
             for (int offset = 0; offset < bytes.Length; offset += chunk.Length)
             {
                 int n = Math.Min(chunk.Length, bytes.Length - offset);
                 Encoding.Latin1.GetChars(bytes.Slice(offset, n), chunk);
                 builder.Append(chunk.Slice(0, n));
             }
+            // チャンクを増やした場合も、返す公開容量は従来どおりテキスト長にそろえる。
+            if (builder.Capacity != (int)length) builder.Capacity = (int)length;
             return builder;
         }
 

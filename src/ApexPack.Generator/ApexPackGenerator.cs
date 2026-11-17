@@ -33,6 +33,28 @@ public sealed class ApexPackGenerator : IIncrementalGenerator
             predicate: static (node, _) => node is TypeDeclarationSyntax,
             transform: static (ctx, _) => (INamedTypeSymbol)ctx.TargetSymbol);
 
+        var invalidUnionTargets = context.SyntaxProvider.ForAttributeWithMetadataName(
+            "ApexPack.ApexUnionAttribute",
+            predicate: static (node, _) => node is TypeDeclarationSyntax,
+            transform: static (ctx, cancellationToken) =>
+            {
+                var type = (INamedTypeSymbol)ctx.TargetSymbol;
+                // A compatibility formatter holder supplies cases for a different type.
+                if (type.TypeKind != TypeKind.Class || (type.IsAbstract && !type.IsStatic)
+                    || TypeAnalyzer.AnalyzeExternalUnions(type).Any())
+                {
+                    return null;
+                }
+
+                var location = ctx.Attributes[0].ApplicationSyntaxReference?.GetSyntax(cancellationToken).GetLocation()
+                    ?? ctx.TargetNode.GetLocation();
+                return Diagnostic.Create(Diagnostics.InvalidUnionTarget, location, type.Name);
+            });
+        context.RegisterSourceOutput(invalidUnionTargets, static (ctx, diagnostic) =>
+        {
+            if (diagnostic is not null) ctx.ReportDiagnostic(diagnostic);
+        });
+
         var all = types.Collect().Combine(compatTypes.Collect()).Combine(externalUnions.Collect());
         var source = context.CompilationProvider.Combine(all);
         context.RegisterSourceOutput(source, static (spc, input) =>
@@ -213,4 +235,29 @@ internal static class Diagnostics
 
     public static readonly DiagnosticDescriptor UnsupportedType = new(
         "APX013", "Unsupported type", "'{0}' cannot be [ApexPackable] (ref struct)", Category, DiagnosticSeverity.Error, true);
+
+    public static readonly DiagnosticDescriptor InvalidUnionTarget = new(
+        "APX014", "Invalid [ApexUnion] target",
+        "[ApexUnion] on class '{0}' requires an abstract class; declare Union cases on an abstract class or interface",
+        Category, DiagnosticSeverity.Error, true);
+
+    public static readonly DiagnosticDescriptor ConflictingMemberAttributes = new(
+        "APX015", "Conflicting member attributes",
+        "Member '{0}' cannot have both [ApexIgnore] and [ApexInclude]", Category, DiagnosticSeverity.Error, true);
+
+    public static readonly DiagnosticDescriptor MultipleApexConstructors = new(
+        "APX016", "Multiple [ApexConstructor] attributes",
+        "Type '{0}' can mark only one constructor with [ApexConstructor]", Category, DiagnosticSeverity.Error, true);
+
+    public static readonly DiagnosticDescriptor CallbackHasParameters = new(
+        "APX017", "ApexPack callback has parameters",
+        "ApexPack callback method '{0}' must be parameterless", Category, DiagnosticSeverity.Error, true);
+
+    public static readonly DiagnosticDescriptor UnionCollection = new(
+        "APX018", "Union cannot use collection generation",
+        "Union type '{0}' cannot use GenerateType.Collection", Category, DiagnosticSeverity.Error, true);
+
+    public static readonly DiagnosticDescriptor InvalidUnionCase = new(
+        "APX019", "Invalid [ApexUnion] case",
+        "Union case '{0}' must inherit or implement '{1}'", Category, DiagnosticSeverity.Error, true);
 }

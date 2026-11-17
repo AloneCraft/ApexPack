@@ -248,6 +248,9 @@ public readonly struct StackFormatter<T, TF> : IApexFormatter<Stack<T>?>
     {
         int count = ApexSequence.ReadCount<TReader, TGuard, T, TF>(ref reader, ref guard);
         if (count < 0) return null;
+        if (count == 0) return new Stack<T>();
+        if (count <= ApexSequence.SmallCollectionCapacity && global::System.Runtime.CompilerServices.Unsafe.SizeOf<T>() <= 32)
+            return ApexSequence.ReadSmallStack<TReader, TTracker, TGuard, T, TF>(ref reader, count, ref tracker, ref guard);
         T[] rented = global::System.Buffers.ArrayPool<T>.Shared.Rent(count);
         try
         {
@@ -881,8 +884,14 @@ public readonly struct FrozenSetFormatter<T, TF> : IApexFormatter<FrozenSet<T>?>
         where TTracker : IReferenceTracker, allows ref struct
         where TGuard : ISecurityGuard, allows ref struct
     {
-        var array = ApexSequence.ReadArray<TReader, TTracker, TGuard, T, TF>(ref reader, ref tracker, ref guard);
-        return array is null ? null : FrozenSet.ToFrozenSet<T>(array);
+        int count = ApexSequence.ReadCount<TReader, TGuard, T, TF>(ref reader, ref guard);
+        if (count < 0) return null;
+        if (count == 0) return FrozenSet<T>.Empty;
+        if (count <= ApexSequence.SmallCollectionCapacity && global::System.Runtime.CompilerServices.Unsafe.SizeOf<T>() <= 32)
+            return ApexSequence.ReadSmallFrozenSet<TReader, TTracker, TGuard, T, TF>(ref reader, count, ref tracker, ref guard);
+        var array = ApexSequence.AllocateArray<T, TF>(count);
+        ApexSequence.ReadElements<TReader, TTracker, TGuard, T, TF>(ref reader, array, ref tracker, ref guard);
+        return FrozenSet.ToFrozenSet<T>(array);
     }
 }
 

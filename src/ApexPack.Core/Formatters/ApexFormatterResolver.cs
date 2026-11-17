@@ -103,6 +103,11 @@ public static class ApexFormatterResolver
         typeof(DateOnly), typeof(TimeOnly), typeof(Half), typeof(Int128), typeof(UInt128), typeof(Rune),
         typeof(Complex), typeof(Vector2), typeof(Vector3), typeof(Vector4), typeof(Quaternion), typeof(Plane),
         typeof(Matrix3x2), typeof(Matrix4x4),
+#if NET11_0_OR_GREATER
+        typeof(BFloat16), typeof(Decimal32), typeof(Decimal64), typeof(Decimal128),
+        typeof(Complex<Half>), typeof(Complex<float>), typeof(Complex<double>), typeof(Complex<BFloat16>),
+        typeof(Complex<Decimal32>), typeof(Complex<Decimal64>), typeof(Complex<Decimal128>),
+#endif
     };
 
     [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "AOT では生成コードのモジュール初期化子で登録される。ここは登録のない型の非 AOT 経路。")]
@@ -119,6 +124,17 @@ public static class ApexFormatterResolver
         }
 
         bool preserveReferences = NeedsReferences(typeof(T), 0);
+        if (!preserveReferences && typeof(T).IsSZArray)
+        {
+            var element = typeof(T).GetElementType()!;
+            if (element.IsClass && IsPackable(element)
+                && element.GetMethod("ApexExactSize", BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly,
+                    binder: null, types: [element.MakeByRefType()], modifiers: null) is { ReturnType: var sizeType }
+                && sizeType == typeof(int))
+            {
+                return (ApexFormatter<T>)Activator.CreateInstance(typeof(ExactSizeArrayFormatter<>).MakeGenericType(element))!;
+            }
+        }
         var adapterType = typeof(FormatterAdapter<,>).MakeGenericType(typeof(T), formatterType);
         // 引数は配列で渡す(bool 1 つだと CreateInstance(Type, bool nonPublic) が選ばれ、コンストラクタに渡らない)
         return (ApexFormatter<T>)Activator.CreateInstance(adapterType, new object[] { preserveReferences })!;

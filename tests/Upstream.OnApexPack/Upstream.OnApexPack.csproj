@@ -6,7 +6,7 @@
     比べる相手は Upstream.OnMemoryPack(本物の MemoryPack)。設定は相手とそろえる。
   -->
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFrameworks>$(ApexPackTargetFrameworks)</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -31,7 +31,6 @@
     <PackageReference Include="FluentAssertions" Version="6.7.0" />
     <PackageReference Include="RandomFixtureKit" Version="1.0.1" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.4.0" />
-    <PackageReference Include="System.IO.Pipelines" Version="9.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">

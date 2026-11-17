@@ -1,7 +1,7 @@
 using System.Globalization;
 using Upstream.Runner;
 
-// 使い方: dotnet run --project tests/Upstream.Runner -c Release -- [--build] [--no-timing] [--filter 文字列] [--out upstream_report.json]
+// 使い方: dotnet run --project tests/Upstream.Runner -c Release -f net9.0 -- [--build] [--no-timing] [--filter 文字列] [--out upstream_report.json]
 // 両側のテストを別プロセスで実行して比べ、結果を JSON に書いて集計を表示する。
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;

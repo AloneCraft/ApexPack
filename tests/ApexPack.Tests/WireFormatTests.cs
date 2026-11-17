@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using ApexPack;
 using ApexPack.Buffers;
 using Xunit;
@@ -97,6 +98,28 @@ public class WireFormatTests
         Assert.True(Write(w => w.String(narrow)).Length < length + 6);
     }
 
+    [Theory]
+    [InlineData(32_767, 'a')]
+    [InlineData(32_768, 'a')]
+    [InlineData(99_999, 'z')]
+    [InlineData(41_999, 'é')]
+    [InlineData(42_000, 'é')]
+    [InlineData(99_999, 'é')]
+    [InlineData(99_999, '語')]
+    public void StringBuilder_LargeContents_KeepWireFormatAndCapacity(int length, char last)
+    {
+        string text = new string('a', length - 1) + last;
+        byte[] bytes = ApexPackSerializer.Serialize(text);
+        Assert.Equal(bytes, ApexPackSerializer.Serialize(new StringBuilder(text)));
+
+        var restored = ApexPackSerializer.Deserialize<StringBuilder>(bytes);
+
+        Assert.Equal(text, restored.ToString());
+        Assert.Equal(length, restored.Capacity);
+        Assert.Equal(bytes, ApexPackSerializer.Serialize(restored));
+        Assert.Throws<ApexSecurityException>(() => ApexPackSerializer.Deserialize<StringBuilder>(bytes.AsSpan(0, bytes.Length - 1)));
+    }
+
     [Fact]
     public void Mask_SevenEightNineBits()
     {
@@ -178,6 +201,24 @@ public class WireFormatTests
         Assert.Equal(nulls, ApexPackSerializer.Deserialize<Leaf?[]>(ApexPackSerializer.Serialize(nulls)));
         var holder = new NullableLeafArrayHolder { Items = new Leaf?[] { null, null } };
         Assert.Equal(2, ApexPackSerializer.Deserialize<NullableLeafArrayHolder>(ApexPackSerializer.Serialize(holder)).Items!.Length);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(3)]
+    public void GeneratedClassArrayMember_PreservesOrderAndChecksLimits(int count)
+    {
+        var items = Enumerable.Range(0, count).Select(i => i == 1 ? null : new Leaf { Value = i + 10 }).ToArray();
+        byte[] bytes = ApexPackSerializer.Serialize(new NullableLeafArrayHolder { Items = items });
+        var restored = ApexPackSerializer.Deserialize<NullableLeafArrayHolder>(bytes);
+        Assert.Equal(items.Select(item => item?.Value), restored.Items!.Select(item => item?.Value));
+
+        if (count > 0)
+        {
+            var limit = new ApexSecurityOptions { MaxCollectionLength = count - 1, MaxTotalElements = count, MaxDepth = 8 };
+            Assert.Throws<ApexSecurityException>(() => ApexPackSerializer.DeserializeSafe<NullableLeafArrayHolder>(bytes, in limit));
+        }
     }
 
     [Fact]

@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Xunit;
 
 namespace ApexPack.Tests;
@@ -20,7 +21,7 @@ public partial struct TrailingPadded
 /// </summary>
 public class PaddedLayoutTests
 {
-    public static IEnumerable<object[]> Counts() => new[] { 0, 1, 2, 3, 17, 64, 65 }.Select(n => new object[] { n });
+    public static IEnumerable<object[]> Counts() => new[] { 0, 1, 2, 3, 4, 5, 17, 64, 65 }.Select(n => new object[] { n });
 
     private static byte[] Header(int count)
     {
@@ -96,6 +97,48 @@ public class PaddedLayoutTests
         Assert.Equal(padded, ApexPackSerializer.Deserialize<TrailingPadded>(paddedBytes));
         // 制約なしの経路(実行時解決)も同じ形式
         Assert.Equal(paddedBytes, ApexPackSerializer.Serialize<TrailingPadded>((object)padded is TrailingPadded p ? p : default));
+    }
+
+    [Fact]
+    public void ByRefSerialization_PreservesLargeRawLayoutAndPackedLayout()
+    {
+        var raw = new LargeRawValue { First = 0x12345678, Last = -456 };
+        byte[] bytes = ApexPackSerializer.SerializeByRef(in raw);
+        Assert.Equal(520, bytes.Length);
+        Assert.Equal(ApexPackSerializer.Serialize(raw), bytes);
+        var restored = ApexPackSerializer.Deserialize<LargeRawValue>(bytes);
+        Assert.Equal(raw.First, restored.First);
+        Assert.Equal(raw.Last, restored.Last);
+
+        var packed = new TrailingPadded { A = 0x0102030405060708, B = -1 };
+        Assert.Equal(ApexPackSerializer.Serialize(packed), ApexPackSerializer.SerializeByRef(in packed));
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 520)]
+    private struct LargeRawValue
+    {
+        [FieldOffset(0)] public int First;
+        [FieldOffset(516)] public int Last;
+    }
+
+    [Fact]
+    public void LargerPaddedTuples_ReadExactlyThePackedFields()
+    {
+        Check((1, -2, 0x1020304, int.MinValue, 5), 1, -2, 0x1020304, int.MinValue, 5);
+        Check((1, -2, 0x1020304, int.MinValue, 5, 6, int.MaxValue), 1, -2, 0x1020304, int.MinValue, 5, 6, int.MaxValue);
+
+        static void Check<T>(T expected, params int[] fields)
+        {
+            byte[] packed = new byte[fields.Length * sizeof(int)];
+            for (int i = 0; i < fields.Length; i++)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(packed.AsSpan(i * sizeof(int)), fields[i]);
+            }
+
+            Assert.Equal(expected, ApexPackSerializer.Deserialize<T>(packed));
+            Assert.Equal(packed, ApexPackSerializer.Serialize(expected));
+            Assert.Throws<InvalidOperationException>(() => ApexPackSerializer.Deserialize<T>(packed.AsSpan(0, packed.Length - 1)));
+        }
     }
 
     [Fact]

@@ -7,7 +7,7 @@
     ジェネレーター(ApexPack.Generator)は、このアセンブリの [MemoryPackable] などを ApexPack の属性と同じ意味に読む。
   -->
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFrameworks>$(ApexPackTargetFrameworks)</TargetFrameworks>
     <RootNamespace>MemoryPack</RootNamespace>
     <AssemblyName>ApexPack.MemoryPackCompat</AssemblyName>
     <IsPackable>false</IsPackable>

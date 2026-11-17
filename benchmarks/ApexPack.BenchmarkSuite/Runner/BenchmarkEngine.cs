@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using ApexPack.BenchmarkSuite.Models;
@@ -111,6 +112,26 @@ public readonly struct GraphOps : IScenarioOps<BenchGraphNode>
     public static BenchGraphNode MpDeserialize(byte[] bytes) => MemoryPackSerializer.Deserialize<BenchGraphNode>(bytes)!;
 }
 
+#if NET11_0_OR_GREATER
+internal readonly struct NumericsArrayOps<T> : IScenarioOps<T[]> where T : unmanaged
+{
+    public static byte[] ApexSerialize(T[] value) => ApexPackSerializer.Serialize(value);
+    public static T[] ApexDeserialize(byte[] bytes) => ApexPackSerializer.Deserialize<T[]>(bytes);
+    public static byte[] MpSerialize(T[] value) => MemoryPackSerializer.Serialize(value);
+    public static T[] MpDeserialize(byte[] bytes) => MemoryPackSerializer.Deserialize<T[]>(bytes)!;
+}
+
+internal readonly struct FullJoinOps : IScenarioOps<IEnumerable<(string? Outer, string? Inner)>>
+{
+    public static byte[] ApexSerialize(IEnumerable<(string? Outer, string? Inner)> value) => ApexPackSerializer.Serialize(value);
+    public static IEnumerable<(string? Outer, string? Inner)> ApexDeserialize(byte[] bytes)
+        => ApexPackSerializer.Deserialize<IEnumerable<(string? Outer, string? Inner)>>(bytes);
+    public static byte[] MpSerialize(IEnumerable<(string? Outer, string? Inner)> value) => MemoryPackSerializer.Serialize(value);
+    public static IEnumerable<(string? Outer, string? Inner)> MpDeserialize(byte[] bytes)
+        => MemoryPackSerializer.Deserialize<IEnumerable<(string? Outer, string? Inner)>>(bytes)!;
+}
+#endif
+
 internal interface IScenario
 {
     string Name { get; }
@@ -123,13 +144,15 @@ internal sealed class Scenario<T, TOps> : IScenario where TOps : IScenarioOps<T>
     private readonly string _tier;
     private readonly string _description;
     private readonly Func<T> _factory;
+    private readonly Func<T, T, bool> _verify;
 
-    public Scenario(string id, string tier, string description, Func<T> factory)
+    public Scenario(string id, string tier, string description, Func<T> factory, Func<T, T, bool>? verify = null)
     {
         _id = id;
         _tier = tier;
         _description = description;
         _factory = factory;
+        _verify = verify ?? (static (expected, actual) => DeepGraphVerifier.AreEqual(expected, actual));
     }
 
     public string Name => $"{_tier}: {_description}";
@@ -139,8 +162,8 @@ internal sealed class Scenario<T, TOps> : IScenario where TOps : IScenarioOps<T>
         T item = _factory();
         byte[] apexBytes = TOps.ApexSerialize(item);
         byte[] mpBytes = TOps.MpSerialize(item);
-        bool verified = DeepGraphVerifier.AreEqual(item, TOps.ApexDeserialize(apexBytes))
-                        && DeepGraphVerifier.AreEqual(item, TOps.MpDeserialize(mpBytes));
+        bool verified = _verify(item, TOps.ApexDeserialize(apexBytes))
+                        && _verify(item, TOps.MpDeserialize(mpBytes));
 
         // 計測関数を段階コンパイルの昇格条件(30 回の呼び出し + 起動直後の遅延)を十分超えて呼び、
         // OSR 版ではなく完全最適化版(static readonly の定数化・脱仮想化を含む)で測る。両ライブラリに同じ条件を適用する。
@@ -373,6 +396,27 @@ public static class BenchmarkEngine
         new Scenario<BenchPersonList, StandardOps<BenchPersonList>>(
             "T3_05_LargePayload", "Tier 3", "Large Payload > 64KB (5,000 objects)",
             () => CreatePersonList(5000)),
+#if NET11_0_OR_GREATER
+        new Scenario<IEnumerable<(string? Outer, string? Inner)>, FullJoinOps>(
+            "T3_06_FullJoin", "Tier 3", "FullJoin (.NET 11, 1,500 rows)",
+            static () =>
+            {
+                var outer = Enumerable.Range(0, 1000).Select(static id => $"Item {id}").ToArray();
+                var inner = Enumerable.Range(500, 1000).Select(static id => $"Item {id}").ToArray();
+                return outer.FullJoin(inner, static value => value, static value => value);
+            },
+            static (expected, actual) => expected.SequenceEqual(actual)),
+        new Scenario<BFloat16[], NumericsArrayOps<BFloat16>>(
+            "T3_07_BFloat16Array", "Tier 3", "BFloat16[] (.NET 11, 4,096 items)",
+            static () => Enumerable.Range(0, 4096).Select(static i => (BFloat16)(i * 0.125f)).ToArray(),
+            static (expected, actual) => expected.AsSpan().SequenceEqual(actual)),
+        new Scenario<Complex<Decimal128>[], NumericsArrayOps<Complex<Decimal128>>>(
+            "T3_08_ComplexDecimal128Array", "Tier 3", "Complex<Decimal128>[] (1,024 items)",
+            static () => Enumerable.Range(0, 1024)
+                .Select(static i => new Complex<Decimal128>((Decimal128)(i + 1), (Decimal128)(-i)))
+                .ToArray(),
+            static (expected, actual) => expected.AsSpan().SequenceEqual(actual)),
+#endif
     };
 
     private static BenchPersonList CreatePersonList(int count)
