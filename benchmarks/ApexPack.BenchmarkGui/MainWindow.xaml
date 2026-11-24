@@ -136,6 +136,10 @@
                     <DataGridTextColumn Header="Des 加速比" Binding="{Binding SpeedupDeserialize, StringFormat={}{0:F2}x}" Width="90"/>
                     <DataGridTextColumn Header="Apex Byte" Binding="{Binding ApexSizeBytes}" Width="80"/>
                     <DataGridTextColumn Header="MP Byte" Binding="{Binding MpSizeBytes}" Width="80"/>
+                    <DataGridTextColumn Header="Apex 直列化割当 B/回" Binding="{Binding ApexAllocBytes}" Width="145"/>
+                    <DataGridTextColumn Header="MP 直列化割当 B/回" Binding="{Binding MpAllocBytes}" Width="140"/>
+                    <DataGridTextColumn Header="Apex 逆直列化割当 B/回" Binding="{Binding ApexDeserializeAllocBytes}" Width="155"/>
+                    <DataGridTextColumn Header="MP 逆直列化割当 B/回" Binding="{Binding MpDeserializeAllocBytes}" Width="150"/>
                     <DataGridTextColumn Header="判定バッジ" Binding="{Binding StatusBadge}" Width="*"/>
                 </DataGrid.Columns>
             </DataGrid>

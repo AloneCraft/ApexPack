@@ -66,6 +66,7 @@ public class BenchmarkScenarioResult
 public class BenchmarkSuiteReport
 {
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public string RuntimeVersion { get; set; } = Environment.Version.ToString();
     public List<BenchmarkScenarioResult> Scenarios { get; set; } = new();
 
     public double GeometricMeanSerializeSpeedup { get; set; }
@@ -104,6 +105,14 @@ public readonly struct Vector3ArrayOps : IScenarioOps<BenchmarkVector3[]>
     public static BenchmarkVector3[] MpDeserialize(byte[] bytes) => MemoryPackSerializer.Deserialize<BenchmarkVector3[]>(bytes)!;
 }
 
+internal readonly struct PublicOps<T> : IScenarioOps<T>
+{
+    public static byte[] ApexSerialize(T value) => ApexPackSerializer.Serialize(value);
+    public static T ApexDeserialize(byte[] bytes) => ApexPackSerializer.Deserialize<T>(bytes);
+    public static byte[] MpSerialize(T value) => MemoryPackSerializer.Serialize(value);
+    public static T MpDeserialize(byte[] bytes) => MemoryPackSerializer.Deserialize<T>(bytes)!;
+}
+
 public readonly struct GraphOps : IScenarioOps<BenchGraphNode>
 {
     public static byte[] ApexSerialize(BenchGraphNode value) => ApexPackSerializer.SerializeWithReferences(value);
@@ -136,6 +145,7 @@ internal interface IScenario
 {
     string Name { get; }
     BenchmarkScenarioResult Run();
+    BenchmarkScenarioResult MeasurePayload();
 }
 
 internal sealed class Scenario<T, TOps> : IScenario where TOps : IScenarioOps<T>
@@ -157,13 +167,50 @@ internal sealed class Scenario<T, TOps> : IScenario where TOps : IScenarioOps<T>
 
     public string Name => $"{_tier}: {_description}";
 
+    public BenchmarkScenarioResult MeasurePayload()
+    {
+        T item = _factory();
+        byte[] apexBytes = TOps.ApexSerialize(item);
+        byte[] mpBytes = TOps.MpSerialize(item);
+        bool verified = Verify(item, apexBytes, mpBytes);
+        const int warmupIterations = 32;
+        TimeApexSer(item, warmupIterations);
+        TimeMpSer(item, warmupIterations);
+        TimeApexDe(apexBytes, warmupIterations);
+        TimeMpDe(mpBytes, warmupIterations);
+        return MeasurePayload(item, apexBytes, mpBytes, verified);
+    }
+
+    private BenchmarkScenarioResult MeasurePayload(T item, byte[] apexBytes, byte[] mpBytes, bool verified)
+    {
+        return new BenchmarkScenarioResult
+        {
+            ScenarioId = _id,
+            Tier = _tier,
+            Description = _description,
+            ApexSizeBytes = apexBytes.Length,
+            ApexAllocBytes = MeasureAlloc(() => TOps.ApexSerialize(item)),
+            ApexDeserializeAllocBytes = MeasureAlloc(() => TOps.ApexDeserialize(apexBytes)),
+            MpSizeBytes = mpBytes.Length,
+            MpAllocBytes = MeasureAlloc(() => TOps.MpSerialize(item)),
+            MpDeserializeAllocBytes = MeasureAlloc(() => TOps.MpDeserialize(mpBytes)),
+            RoundtripVerified = verified
+        };
+    }
+
+    private bool Verify(T item, byte[] apexBytes, byte[] mpBytes)
+    {
+        bool apexVerified = _verify(item, TOps.ApexDeserialize(apexBytes));
+        bool memoryVerified = _verify(item, TOps.MpDeserialize(mpBytes));
+        return apexVerified && memoryVerified;
+    }
+
     public BenchmarkScenarioResult Run()
     {
         T item = _factory();
         byte[] apexBytes = TOps.ApexSerialize(item);
         byte[] mpBytes = TOps.MpSerialize(item);
-        bool verified = _verify(item, TOps.ApexDeserialize(apexBytes))
-                        && _verify(item, TOps.MpDeserialize(mpBytes));
+        bool verified = Verify(item, apexBytes, mpBytes);
 
         // 計測関数を段階コンパイルの昇格条件(30 回の呼び出し + 起動直後の遅延)を十分超えて呼び、
         // OSR 版ではなく完全最適化版(static readonly の定数化・脱仮想化を含む)で測る。両ライブラリに同じ条件を適用する。
@@ -204,23 +251,12 @@ internal sealed class Scenario<T, TOps> : IScenario where TOps : IScenarioOps<T>
             }
         }
 
-        return new BenchmarkScenarioResult
-        {
-            ScenarioId = _id,
-            Tier = _tier,
-            Description = _description,
-            ApexSerializeNs = Median(apexSer),
-            ApexDeserializeNs = Median(apexDe),
-            ApexSizeBytes = apexBytes.Length,
-            ApexAllocBytes = MeasureAlloc(() => TOps.ApexSerialize(item)),
-            ApexDeserializeAllocBytes = MeasureAlloc(() => TOps.ApexDeserialize(apexBytes)),
-            MpSerializeNs = Median(mpSer),
-            MpDeserializeNs = Median(mpDe),
-            MpSizeBytes = mpBytes.Length,
-            MpAllocBytes = MeasureAlloc(() => TOps.MpSerialize(item)),
-            MpDeserializeAllocBytes = MeasureAlloc(() => TOps.MpDeserialize(mpBytes)),
-            RoundtripVerified = verified
-        };
+        var result = MeasurePayload(item, apexBytes, mpBytes, verified);
+        result.ApexSerializeNs = Median(apexSer);
+        result.ApexDeserializeNs = Median(apexDe);
+        result.MpSerializeNs = Median(mpSer);
+        result.MpDeserializeNs = Median(mpDe);
+        return result;
     }
 
     private const int Rounds = 11;
@@ -300,19 +336,29 @@ internal sealed class Scenario<T, TOps> : IScenario where TOps : IScenarioOps<T>
         return copy[copy.Length / 2];
     }
 
-    private static long MeasureAlloc(Func<object?> action)
+    private static long MeasureAlloc<TResult>(Func<TResult> action)
     {
         const int n = 64;
         action();
         long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < n; i++) s_sink = action();
-        return (GC.GetAllocatedBytesForCurrentThread() - before) / n;
+        TResult last = default!;
+        for (int i = 0; i < n; i++) last = action();
+        long bytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        GC.KeepAlive(last);
+        return bytes / n;
     }
 }
 
 public static class BenchmarkEngine
 {
-    private static List<IScenario> CreateScenarios() => new()
+    private static List<IScenario> CreateScenarios()
+    {
+        var scenarios = CreateExistingScenarios();
+        ComparisonScenarios.AddTo(scenarios);
+        return scenarios;
+    }
+
+    private static List<IScenario> CreateExistingScenarios() => new()
     {
         new Scenario<BenchmarkPrimitives, StandardOps<BenchmarkPrimitives>>(
             "T1_01_Primitives", "Tier 1", "Basic Primitives (int, long, double, guid)",
@@ -392,7 +438,7 @@ public static class BenchmarkEngine
                     nodes[i].Other = nodes[(i * 37) % nodes.Length];
                 }
                 return nodes[0];
-            }),
+            }, ComparisonScenarios.PreservesGraph),
         new Scenario<BenchPersonList, StandardOps<BenchPersonList>>(
             "T3_05_LargePayload", "Tier 3", "Large Payload > 64KB (5,000 objects)",
             () => CreatePersonList(5000)),
@@ -429,9 +475,24 @@ public static class BenchmarkEngine
         return list;
     }
 
+    public static IReadOnlyList<BenchmarkScenarioResult> MeasurePayloads()
+        => CreateScenarios().Select(static scenario => scenario.MeasurePayload()).ToArray();
+
     public static BenchmarkSuiteReport RunAll(Action<string, int, int>? progressCallback = null)
+        => RunScenarios(CreateScenarios(), progressCallback);
+
+    public static BenchmarkSuiteReport RunRange(int offset, int count, Action<string, int, int>? progressCallback = null)
     {
         var runners = CreateScenarios();
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
+        if (offset >= runners.Count || count > runners.Count - offset)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        return RunScenarios(runners.GetRange(offset, count), progressCallback);
+    }
+
+    private static BenchmarkSuiteReport RunScenarios(List<IScenario> runners, Action<string, int, int>? progressCallback)
+    {
         var scenarios = new List<BenchmarkScenarioResult>();
         int total = runners.Count;
 

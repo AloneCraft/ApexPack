@@ -33,16 +33,47 @@ public static class Program
 {
     public static void Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--verify")
+        {
+            var scenarios = ApexPack.BenchmarkSuite.Runner.BenchmarkEngine.MeasurePayloads();
+            var failed = scenarios.Where(static scenario => !scenario.RoundtripVerified).ToArray();
+            Console.WriteLine($".NET {Environment.Version}: {scenarios.Count - failed.Length}/{scenarios.Count} round-trip verifications passed.");
+            foreach (var scenario in failed) Console.Error.WriteLine(scenario.ScenarioId);
+            if (args.Length > 1)
+            {
+                var snapshot = new
+                {
+                    RuntimeVersion = Environment.Version.ToString(),
+                    AllVerified = failed.Length == 0,
+                    Scenarios = scenarios.Select(static s => new
+                    {
+                        s.ScenarioId, s.Tier, s.Description, s.RoundtripVerified,
+                        s.ApexSizeBytes, s.MpSizeBytes,
+                        s.ApexAllocBytes, s.MpAllocBytes,
+                        s.ApexDeserializeAllocBytes, s.MpDeserializeAllocBytes
+                    })
+                };
+                File.WriteAllText(args[1], System.Text.Json.JsonSerializer.Serialize(snapshot,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            }
+            Environment.ExitCode = failed.Length == 0 ? 0 : 1;
+            return;
+        }
+
         if (args.Length > 0 && (args[0] == "--cli" || args[0] == "--json"))
         {
+            bool subset = args is ["--json", _, "--range", _, _];
+            if (args.Length > 2 && !subset)
+                throw new ArgumentException("Use --json <path> --range <zero-based offset> <count>.");
             Console.WriteLine("Running ApexPack.BenchmarkSuite in Headless CLI mode...");
             // 他プロセスの負荷による揺れを減らすため、計測中だけ自プロセスの優先度を上げる
             Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
             System.Threading.Thread.CurrentThread.Priority = System.Threading.ThreadPriority.Highest;
-            var report = ApexPack.BenchmarkSuite.Runner.BenchmarkEngine.RunAll((desc, cur, tot) =>
-            {
-                Console.WriteLine($"[{cur}/{tot}] {desc}...");
-            });
+            static void ReportProgress(string description, int current, int total)
+                => Console.WriteLine($"[{current}/{total}] {description}...");
+            var report = subset
+                ? ApexPack.BenchmarkSuite.Runner.BenchmarkEngine.RunRange(int.Parse(args[3]), int.Parse(args[4]), ReportProgress)
+                : ApexPack.BenchmarkSuite.Runner.BenchmarkEngine.RunAll(ReportProgress);
 
             Console.WriteLine();
             Console.WriteLine("==========================================================================");
@@ -56,6 +87,7 @@ public static class Program
             string json = System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
             System.IO.File.WriteAllText(outPath, json);
             Console.WriteLine($"Benchmark report successfully written to: {System.IO.Path.GetFullPath(outPath)}");
+            Environment.ExitCode = report.AllVerified ? 0 : 1;
             return;
         }
 
