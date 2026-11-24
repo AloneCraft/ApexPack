@@ -12,6 +12,61 @@
 dotnet run --file docs/examples/QuickStart.cs
 ```
 
+## 性能とデータサイズのインフォグラフィック
+
+全87シナリオを、行にシナリオ、列に .NET バージョンと測定項目を置いて並べました。数字は **ApexPack ÷ MemoryPack** です。1.00未満なら ApexPack の処理時間が短い、または出力が小さいことを示します。
+
+<details open>
+<summary>基本型・文字列</summary>
+
+![基本型・文字列の直列化時間・逆直列化時間・出力サイズの比](docs/images/runtime-benchmarks-basics.png)
+
+</details>
+
+<details>
+<summary>継承・入れ子・複合モデル</summary>
+
+![継承・入れ子・複合モデルの比較](docs/images/runtime-benchmarks-models.png)
+
+</details>
+
+<details>
+<summary>大容量データ・.NET 11 固有ケース</summary>
+
+![大容量データと .NET 11 固有ケースの比較](docs/images/runtime-benchmarks-large.png)
+
+</details>
+
+<details>
+<summary>値型・参照型の単体と配列</summary>
+
+![値型・参照型の単体と配列の比較](docs/images/runtime-benchmarks-shapes.png)
+
+</details>
+
+<details>
+<summary>配列・リスト・辞書</summary>
+
+![配列・リスト・辞書の比較](docs/images/runtime-benchmarks-collections.png)
+
+</details>
+
+<details>
+<summary>木・共有・循環参照</summary>
+
+![木・共有・循環参照の比較](docs/images/runtime-benchmarks-graphs.png)
+
+</details>
+
+<details>
+<summary>参照型の null 許容性</summary>
+
+![参照型の null 許容性の比較](docs/images/runtime-benchmarks-nullability.png)
+
+</details>
+
+[性能とデータサイズのインフォグラフィック](docs/performance.md) · [実測値と割り当て量の全件CSV](docs/data/runtime-benchmarks.csv)
+
 <!-- benchmark-results:begin -->
 ## MemoryPack との比較結果
 

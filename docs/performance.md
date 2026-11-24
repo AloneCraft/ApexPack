@@ -1,4 +1,40 @@
-# 性能とデータサイズ
+# 性能とデータサイズのインフォグラフィック
+
+## シナリオ別のインフォグラフィック
+
+.NET 9／10／11 の全87シナリオを掲載しています。行はシナリオ、列はランタイムごとの直列化時間、逆直列化時間、出力サイズです。数値は **ApexPack ÷ MemoryPack** で、MemoryPack を 1.00 としています。緑は ApexPack が短時間または小容量、橙は MemoryPack が短時間または小容量です。画像を選択すると原寸で表示できます。
+
+### 基本型・文字列
+
+[![基本型・文字列の比較](images/runtime-benchmarks-basics.png)](images/runtime-benchmarks-basics.png)
+
+### 継承・入れ子・複合モデル
+
+[![継承・入れ子・複合モデルの比較](images/runtime-benchmarks-models.png)](images/runtime-benchmarks-models.png)
+
+### 大容量データ・.NET 11 固有ケース
+
+[![大容量データと .NET 11 固有ケースの比較](images/runtime-benchmarks-large.png)](images/runtime-benchmarks-large.png)
+
+### 値型・参照型の単体と配列
+
+[![値型・参照型の単体と配列の比較](images/runtime-benchmarks-shapes.png)](images/runtime-benchmarks-shapes.png)
+
+### 配列・リスト・辞書
+
+[![配列・リスト・辞書の比較](images/runtime-benchmarks-collections.png)](images/runtime-benchmarks-collections.png)
+
+### 木・共有・循環参照
+
+[![木・共有・循環参照の比較](images/runtime-benchmarks-graphs.png)](images/runtime-benchmarks-graphs.png)
+
+### 参照型の null 許容性
+
+[![参照型の null 許容性の比較](images/runtime-benchmarks-nullability.png)](images/runtime-benchmarks-nullability.png)
+
+[実測値と割り当て量の全件CSV](data/runtime-benchmarks.csv)
+
+CSVを更新したら、Pillow が入った Windows 環境でリポジトリルートから `python tools/generate_benchmark_infographics.py` を実行すると、7枚の図を再生成できます。
 
 ## .NET 9／10／11 の比較ベンチマーク
 

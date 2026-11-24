@@ -2,7 +2,7 @@
   href: index.md
 - name: C# ファイル1本で始める
   href: quickstart.md
-- name: 性能とデータサイズ
+- name: 性能とデータサイズのインフォグラフィック
   href: performance.md
 - name: ワイヤ形式
   href: WireFormat.md
