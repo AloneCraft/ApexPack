@@ -1,95 +1,75 @@
-# 性能とデータサイズのインフォグラフィック
+# Performance and data size charts
 
-## シナリオ別のインフォグラフィック
+These charts compare ApexPack with MemoryPack across 87 scenarios on .NET 9, 10, and 11. Each row shows one scenario. Each runtime has three columns: write time, read time, and output size.
 
-.NET 9／10／11 の全87シナリオを掲載しています。行はシナリオ、列はランタイムごとの直列化時間、逆直列化時間、出力サイズです。数値は **ApexPack ÷ MemoryPack** で、MemoryPack を 1.00 としています。緑は ApexPack が短時間または小容量、橙は MemoryPack が短時間または小容量です。画像を選択すると原寸で表示できます。
+- **Positive:** ApexPack takes less time or produces fewer bytes.
+- **Negative:** ApexPack takes more time or produces more bytes.
+- **Zero:** The values are equal at the displayed precision.
 
-### 基本型・文字列
+For example, **+25%** in write time means ApexPack takes 25% less time to serialize the same input. Write time means serialization. Read time means deserialization. Bars stop at 100%. The labels show the full percentage.
 
-[![基本型・文字列の比較](images/runtime-benchmarks-basics.png)](images/runtime-benchmarks-basics.png)
+[All charts as text tables](benchmark-results.md) · [Raw measurements and memory allocations (CSV)](data/runtime-benchmarks.csv)
 
-### 継承・入れ子・複合モデル
+## Basic types and strings
 
-[![継承・入れ子・複合モデルの比較](images/runtime-benchmarks-models.png)](images/runtime-benchmarks-models.png)
+[![Changes in write time, read time, and output size for basic types and strings](images/runtime-benchmarks-basics.png)](images/runtime-benchmarks-basics.png)
 
-### 大容量データ・.NET 11 固有ケース
+## Inheritance and nested objects
 
-[![大容量データと .NET 11 固有ケースの比較](images/runtime-benchmarks-large.png)](images/runtime-benchmarks-large.png)
+[![Changes for inheritance and nested objects](images/runtime-benchmarks-models.png)](images/runtime-benchmarks-models.png)
 
-### 値型・参照型の単体と配列
+## Large payloads and .NET 11 features
 
-[![値型・参照型の単体と配列の比較](images/runtime-benchmarks-shapes.png)](images/runtime-benchmarks-shapes.png)
+[![Changes for large payloads and .NET 11 features](images/runtime-benchmarks-large.png)](images/runtime-benchmarks-large.png)
 
-### 配列・リスト・辞書
+## Value types and reference types
 
-[![配列・リスト・辞書の比較](images/runtime-benchmarks-collections.png)](images/runtime-benchmarks-collections.png)
+[![Changes for single values and arrays of value types and reference types](images/runtime-benchmarks-shapes.png)](images/runtime-benchmarks-shapes.png)
 
-### 木・共有・循環参照
+## Arrays, lists, and dictionaries
 
-[![木・共有・循環参照の比較](images/runtime-benchmarks-graphs.png)](images/runtime-benchmarks-graphs.png)
+[![Changes for arrays, lists, and dictionaries](images/runtime-benchmarks-collections.png)](images/runtime-benchmarks-collections.png)
 
-### 参照型の null 許容性
+## Trees, shared references, and cycles
 
-[![参照型の null 許容性の比較](images/runtime-benchmarks-nullability.png)](images/runtime-benchmarks-nullability.png)
+[![Changes for trees, shared references, and cycles](images/runtime-benchmarks-graphs.png)](images/runtime-benchmarks-graphs.png)
 
-[実測値と割り当て量の全件CSV](data/runtime-benchmarks.csv)
+## Nullable references
 
-CSVを更新したら、Pillow が入った Windows 環境でリポジトリルートから `python tools/generate_benchmark_infographics.py` を実行すると、7枚の図を再生成できます。
+[![Changes for required and nullable references](images/runtime-benchmarks-nullability.png)](images/runtime-benchmarks-nullability.png)
 
-## .NET 9／10／11 の比較ベンチマーク
+## How the benchmarks were run
 
-ベンチマーク画面では、既存シナリオに加えて、次の比較を実行できます。各行で直列化・逆直列化の時間（ns/回）、出力バイト数、直列化・逆直列化で割り当てたバイト数（B/回）を両ライブラリについて表示します。
+The measurements are from November 25, 2026. All runs used the same Windows x64 host, a Release build, and MemoryPack 1.21.4. The study covers 84 scenarios on .NET 9.0.23, 84 on .NET 10.0.15, and 87 on .NET 11.0.0. Each reported time is the median of 11 rounds. The run order alternates between the libraries.
 
-| 分類 | 入力 |
-| --- | --- |
-| Shape | 固定長の値型・参照型（フィールド合計16 B／128 B）と、短い／長い文字列を持つ値型・参照型。それぞれ単体と配列1／32／1,024要素 |
-| Collection | 同じ32／1,024要素を使う配列・List・LinkedListと、同じキーと値を使うDictionary・SortedDictionary・SortedList |
-| Graph | 100／1,000ノードのチェーン、二分木、共有参照を持つ非循環グラフ、循環グラフ。復元値と参照先の同一性を検証 |
-| Nullability | 同じ値を持つ `string`／`string?` と固定長の子クラス／子クラス `?`。文字列についてはnullが約33%と100%の場合も比較 |
+Most processes measured up to eight scenarios and used a 384 MiB GC heap limit. Each graph with 1,000 nodes ran in its own process with a 1 GiB heap limit and `DOTNET_GCConserveMemory=9`. Both libraries used the same settings for each scenario on all three runtimes. Memory allocation is the average over 64 operations on the measuring thread after warm-up.
 
-`benchmarks/ApexPack.Benchmarks` を Release で実行し、`-f net9.0`、`-f net10.0`、`-f net11.0` を指定してランタイムを切り替えます。たとえば .NET 11 の全項目を JSON に出すには、リポジトリルートで次を実行します。
+To run the benchmarks, select `net9.0`, `net10.0`, or `net11.0`. For example, from the repository root:
 
 ```sh
 dotnet run --project benchmarks/ApexPack.Benchmarks -c Release -f net11.0 -- --json benchmark-net11.json
 ```
 
-`--verify benchmark-payload-net11.json` は時間測定を省き、往復の検証結果、出力サイズ、割り当て量を保存します。割り当て量は準備処理を終えた後、計測スレッドでの64回分を1回あたりに換算した値です。
+Use `--verify benchmark-payload-net11.json` to check round trips and save output sizes and memory allocations without timing the operations.
 
-GitHub トップの比較表は、3ランタイムの速度・サイズ・割り当て量が揃った結果を使って更新します。`tools/UpdateBenchmarkReadme.ps1` に比較 CSV を渡すと、README の代表ケースと `docs/data/runtime-benchmarks.csv` を更新できます。
+To update the README table and raw data, pass the new comparison CSV to `tools/UpdateBenchmarkReadme.ps1`. On Windows with Pillow installed, run `python tools/generate_benchmark_infographics.py` to update the seven charts and the text tables.
 
-2026年11月25日の [全件データ](data/runtime-benchmarks.csv) は Windows x64 の同一ホストで、Release ビルドと MemoryPack 1.21.4 を使って取得しました。対象は .NET 9.0.23 の84件、10.0.15 の84件、11.0.0 の87件です。処理時間は各ケースで両ライブラリの実行順を交互にした11ラウンドの中央値です。
+## Nullable array study
 
-ホスト負荷に対応するため、通常ケースは最大8件ずつ独立したプロセスで計測し、GCヒープ上限を384 MiBにしました。1,000ノードの参照グラフは1件ずつ独立したプロセスで計測し、上限を1 GiB、`DOTNET_GCConserveMemory` を9に設定しました。各ケースのGC設定は、3ランタイムと両ライブラリで揃えています。
+For arrays of fixed-size nullable values, ApexPack stores a bitmap and the values that are present. MemoryPack copies the memory layout for every element, including null elements. This study varies the element size and the share of null values to show how those choices affect time and output size. [ApexPack wire format](WireFormat.md)
 
-## nullable 配列の計測例
+[![Output size savings and speed ratios for nullable arrays with different element sizes and shares of null values](images/nullable-array-tradeoff.png)](images/nullable-array-tradeoff.png)
 
-`Nullable<T>[]` の要素サイズと null 率を変えると、出力サイズと処理時間のバランスが変わります。ApexPack は存在ビットマップと値のある要素を保存します。今回の固定長型では、MemoryPack は null の要素も含めた `Nullable<T>` のメモリ表現を一括でコピーします。[ApexPack のワイヤ形式](WireFormat.md)
+The speed ratio in this chart is **MemoryPack time divided by ApexPack time**. Above 1.00 means ApexPack is faster. Below 1.00 means MemoryPack is faster. A dot marks a case where the faster library changed between the two runs.
 
-## 要素サイズと null 率で比較する
-
-[![1,000 要素と 10,000 要素の nullable 配列について、値型サイズと null 率ごとの出力サイズ削減率、直列化速度比、逆直列化速度比を示すヒートマップ](images/nullable-array-tradeoff.png)](images/nullable-array-tradeoff.png)
-
-速度比は **MemoryPack の時間 ÷ ApexPack の時間** です。1.00 を上回ると ApexPack が速く、下回ると MemoryPack が速いことを示します。点のあるマスは、2回の計測で速い側が入れ替わった条件です。画像を選択すると原寸で表示できます。
-
-| 要素数 | 値型のサイズ | null 率 | ApexPack の出力サイズ削減率 | 直列化速度比 | 逆直列化速度比 |
+| Items | Element size | Null values | Output size reduction | Write speed ratio | Read speed ratio |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1,000 | 1 B | 33% | 60% | 0.11 | 0.19 |
 | 10,000 | 16 B | 67% | 77% | 2.51 | 0.78 |
 | 1,000 | 128 B | 90% | 90% | 6.56 | 0.90 |
 
-1 B の例では、出力サイズが 2,004 B から 795 B に減る一方、直列化と逆直列化は MemoryPack が速くなりました。16 B と 128 B の例では、ApexPack が出力を小さくしながら直列化を短縮し、逆直列化では MemoryPack が速くなりました。
+[![Output size and time per array at a 33% null rate](images/nullable-array-absolute.png)](images/nullable-array-absolute.png)
 
-## バイト数と処理時間を見る
+The horizontal axis shows the size of one value in bytes. Each step doubles that size. The vertical axis uses a logarithmic scale and shows output size in KiB or time in microseconds per array. The times include allocating the array returned by the API.
 
-[![null 率 33% の配列を対象に、値型サイズに対する出力サイズ、直列化時間、逆直列化時間の実測値を示すグラフ](images/nullable-array-absolute.png)](images/nullable-array-absolute.png)
-
-- 横軸は `Nullable<T>` の中の値型 `T` 1要素のサイズです。単位は B（バイト）で、目盛は1、2、4、8と倍になります。
-- 縦軸は配列1件あたりの対数目盛です。左列は出力サイズ（KiB）、中央列は直列化時間（µs）、右列は逆直列化時間（µs）を示します。処理時間は公開 API が返す配列の割り当てを含みます。
-
-## 計測条件とデータ
-
-- 2026年11月16日、Windows x64、Intel Core i7-14700F、.NET 11.0.0、Release ビルド、MemoryPack 1.21.4。
-- 1,000・10,000 要素、値型のサイズ 1・2・4・8・16・32・64・128 B、null 率 0・10・33・67・90% の80条件。同じ要素数では、null 率ごとに同じ位置を使用しました。
-- 各条件を2プロセスで5組ずつ計測。処理時間は10回の中央値、ヒートマップの速度比は各組で計算した速度比の中央値です。80条件すべてで出力サイズと復元値を検証しました。
-
-[全80条件のデータを CSV でダウンロード](data/nullable-array-benchmarks.csv)。処理時間は `*Ns`、出力サイズは `*WireBytes`、1回あたりの割り当て量は `*AllocatedBytes` の列で確認できます。
+This separate study used .NET 11.0.0 and MemoryPack 1.21.4 on Windows x64 with an Intel Core i7-14700F on November 16, 2026. It tested 1,000 and 10,000 items, eight value sizes from 1 to 128 bytes, and five percentages of null values from 0% to 90%. Each of the 80 conditions ran five rounds in each of two processes. The study verified the output sizes and decoded values for every condition. [All 80 conditions (CSV)](data/nullable-array-benchmarks.csv)

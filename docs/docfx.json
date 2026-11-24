@@ -1,6 +1,6 @@
 {
   "build": {
-    "content": ["index.md", "quickstart.md", "performance.md", "WireFormat.md", "toc.yml"],
+    "content": ["index.md", "quickstart.md", "performance.md", "benchmark-results.md", "WireFormat.md", "toc.yml"],
     "resource": ["images/*.png", "data/*.csv", "examples/QuickStart.cs"],
     "output": "_site",
     "template": ["default", "modern"],
@@ -8,7 +8,13 @@
       "_appName": "ApexPack",
       "_appTitle": "ApexPack",
       "_enableSearch": true,
-      "_lang": "ja"
+      "_lang": "en"
+    },
+    "fileMetadata": {
+      "_lang": {
+        "quickstart.md": "ja",
+        "WireFormat.md": "ja"
+      }
     }
   }
 }

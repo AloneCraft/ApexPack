@@ -12,14 +12,14 @@ if (($groups | ForEach-Object { ([version]$_.Name).Major }) -join ',' -ne '9,10,
 }
 
 $headline = [ordered]@{
-    'Compare_Collection_LinkedList_Int32_1024' = '`LinkedList<int>`、1,024要素'
-    'Compare_Collection_SortedDictionary_Int32_1024' = '`SortedDictionary<int, int>`、1,024件'
-    'Compare_Graph_Shared_1000' = '共有参照、1,000ノード'
-    'Compare_Graph_Cycle_1000' = '循環参照、1,000ノード'
-    'Compare_Nullability_RequiredText' = '`string`、全値非null'
-    'Compare_Nullability_OptionalText' = '`string?`、全値非null'
-    'Compare_Nullability_RequiredChild' = '固定長の子クラス、全値非null'
-    'Compare_Nullability_OptionalChild' = '固定長の子クラス `?`、全値非null'
+    'Compare_Collection_LinkedList_Int32_1024' = '`LinkedList<int>` (1,024 items)'
+    'Compare_Collection_SortedDictionary_Int32_1024' = '`SortedDictionary<int, int>` (1,024 entries)'
+    'Compare_Graph_Shared_1000' = 'Shared references (1,000 nodes)'
+    'Compare_Graph_Cycle_1000' = 'Cycle (1,000 nodes)'
+    'Compare_Nullability_RequiredText' = 'Required string, all values present'
+    'Compare_Nullability_OptionalText' = 'Nullable string, all values present'
+    'Compare_Nullability_RequiredChild' = 'Required child object, all values present'
+    'Compare_Nullability_OptionalChild' = 'Nullable child object, all values present'
 }
 $timings = 'ApexSerializeNs', 'MemoryPackSerializeNs', 'ApexDeserializeNs', 'MemoryPackDeserializeNs'
 $bytes = 'ApexOutputBytes', 'MemoryPackOutputBytes',
@@ -62,15 +62,15 @@ $begin = '<!-- benchmark-results:begin -->'
 $end = '<!-- benchmark-results:end -->'
 $section = @(
     $begin
-    '## MemoryPack との比較結果'
+    '## Selected benchmark measurements'
     ''
-    '各セルは **ApexPack / MemoryPack** の順です。処理時間と割り当て量は1回あたりです。'
+    'Each cell shows **ApexPack / MemoryPack**. Times and memory allocations are per operation.'
     ''
-    '| ランタイム | シナリオ | 直列化 ns | 逆直列化 ns | 出力 B | 直列化割当 B | 逆直列化割当 B |'
+    '| Runtime | Scenario | Write time (ns) | Read time (ns) | Output (bytes) | Write allocation (bytes) | Read allocation (bytes) |'
     '| --- | --- | ---: | ---: | ---: | ---: | ---: |'
     $table
     ''
-    '[全ケースの結果（CSV）](docs/data/runtime-benchmarks.csv) · [計測手順](docs/performance.md)'
+    '[All raw measurements (CSV)](docs/data/runtime-benchmarks.csv) · [How the benchmarks were run](docs/performance.md#how-the-benchmarks-were-run)'
     $end
 ) -join "`n"
 
@@ -79,8 +79,8 @@ $readme = [IO.File]::ReadAllText($readmePath)
 $pattern = [regex]::Escape($begin) + '[\s\S]*?' + [regex]::Escape($end)
 if ([regex]::Matches($readme, $pattern).Count -eq 1) {
     $readme = [regex]::Replace($readme, $pattern, { param($match) $section })
-} elseif (!$readme.Contains($begin) -and !$readme.Contains($end) -and $readme.Contains('## ドキュメントの公開')) {
-    $readme = $readme.Replace('## ドキュメントの公開', "$section`n`n## ドキュメントの公開")
+} elseif (!$readme.Contains($begin) -and !$readme.Contains($end) -and $readme.Contains('## Publish the documentation')) {
+    $readme = $readme.Replace('## Publish the documentation', "$section`n`n## Publish the documentation")
 } else {
     throw 'The README has no unique benchmark section.'
 }
